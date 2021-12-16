@@ -1,0 +1,3120 @@
+---
+title: "Analysis_2"
+author: "Eloi Schmauch"
+date: "10/9/2020"
+output:
+  html_document:
+    df_print: kable
+    css: style.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+
+```{r load_packages}
+library("readr")
+library(tidyverse)
+library("DESeq2")
+library(M3C)
+library('ggplot2')
+library('gplots')
+library(VennDiagram)
+library("pheatmap")
+library("RColorBrewer")
+library("BiocParallel")
+#library(Biostrings)
+require("ggrepel")
+library("ggvenn")
+library(parallel)
+library(MASS)
+register(MulticoreParam(12))
+#cts <- as.matrix(read.csv('/media/eloi/SSDM2/new_raw_data/data_aim3/QNS30091/counts/counts_ens.csv',sep="\t",row.names="gene_id"))
+
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+
+
+## Load data and function
+
+```{r load data}
+setwd('/home/eloi/Dropbox (MIT)/HEART/Analysis_aim2-3/aim2/')
+# Save an object to a file
+datasets_analysis = readRDS(file = "datasets_analysis.rds")
+type_canno.species = readRDS(file = "type_canno.species.rds")
+type_isomir.species = readRDS(file = "type_isomir.species.rds")
+                          
+# Merge the canonical annotations
+threshold = 20
+
+normalize_and_select_with_candidates <- function(dataset, threshold, norm = TRUE, isomir_only = FALSE, norm_isomir = FALSE) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalise then filter
+  dataset_copy = dataset
+  if (isomir_only) {
+    if (norm) {
+      dataset_copy = norm_isomir
+      dataset_copy = dataset_copy[row.names(dataset_copy) %in% row.names(type_isomir.species),]
+      dataset_copy = 1000000 * (dataset_copy / colSums(dataset_copy))
+    }
+    dataset_copy = dataset_copy[((rowSums(dataset_copy)/ncol(dataset_copy)) >= threshold),]
+  } else {
+    if (norm) {
+      dataset_copy$isomir = dataset_copy$isomir_norm
+      dataset_copy$cannonical = dataset_copy$cannonical_norm
+    }
+    dataset_copy$isomir = dataset_copy$isomir[((rowSums(dataset_copy$isomir)/ncol(dataset_copy$isomir)) >= threshold),]
+    #Same for the cannonical
+    dataset_copy$cannonical = dataset_copy$cannonical[((rowSums(dataset_copy$cannonical)/ncol(dataset_copy$cannonical)) >= threshold),]
+  }
+  return(dataset_copy)
+}
+
+normalize_and_select <- function(dataset, threshold, norm = TRUE, isomir_only = FALSE, norm_isomir = FALSE) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalise then filter
+  if (isomir_only) {
+    dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset = norm_isomir
+      dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+      dataset = 1000000 * (dataset / colSums(dataset))
+    }
+    dataset = dataset[((rowSums(dataset)/ncol(dataset)) >= threshold),]
+  } else {
+    dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset$isomir = dataset$isomir_norm
+      dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+      dataset$cannonical = dataset$cannonical_norm
+    }
+    dataset$isomir = dataset$isomir[((rowSums(dataset$isomir)/ncol(dataset$isomir)) >= threshold),]
+    #Same for the cannonical
+    dataset$cannonical = dataset$cannonical[((rowSums(dataset$cannonical)/ncol(dataset$cannonical)) >= threshold),]
+  }
+  return(dataset)
+}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+#barplot(prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"])))
+#barplot(prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir), "isomir_type"])))
+
+
+merge_common_cano <- function(canno_dataset, type_isomir.species) {
+  id_sp = row.names(canno_dataset)
+  test_canno = t(as.matrix(canno_dataset))
+  colnames(test_canno) = id_sp
+  new_sp = type_canno.species
+  new_sp = new_sp[!duplicated(new_sp$host_name), ]
+  new_canno = sapply(rownames(new_sp), function(row_id){
+    host_name = new_sp[row_id, 'host_name']
+    expr_canno = test_canno[,(colnames(test_canno) %in% rownames(type_canno.species[type_canno.species$host_name == host_name,]))]
+    return(rowSums(data.frame(expr_canno)))
+  })
+  id_sp = colnames(new_canno)
+  new_canno = t(as.matrix(new_canno))
+  row.names(new_canno) = id_sp
+  return(list(data.frame(new_canno), new_sp))
+}
+
+## Merge for each canno dataset
+sene_copy = datasets_analysis$`Senescence dataset`$cannonical
+
+mirdeep = TRUE
+
+##IF MIRDEEP
+if (!mirdeep) {
+   datasets_analysis = lapply(datasets_analysis, function(dataset) {
+   cannoc = merge_common_cano(dataset$cannonical, type_isomir.species)[[1]]
+   return(list(
+     'cannonical' = cannoc,
+     'isomir' = dataset$isomir
+   ))
+  })
+  type_canno.species = merge_common_cano(sene_copy, type_isomir.species)[[2]]
+}
+
+
+
+
+filt_dataset <- function(dataset, threshold, species_file, dataset_norm) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalize then filter
+  dataset_filt = dataset
+  dataset_filt = dataset_filt[row.names(dataset_filt) %in% row.names(species_file),]
+  dataset_norm = dataset_norm[row.names(dataset_norm) %in% row.names(species_file),]
+  dataset_filt = dataset_filt[((rowSums(dataset_norm)/ncol(dataset_norm)) >= threshold),]
+  dataset_norm = dataset_norm[((rowSums(dataset_norm)/ncol(dataset_norm)) >= threshold),]
+  return(list(dataset_filt, dataset_norm))
+}
+```
+
+## Construct Deseq functions and exploration functions
+
+```{r Deseq functions}
+
+type_isomir.species = type_isomir.species[type_isomir.species$host_id %in% type_canno.species$host_name,]
+
+print(length(unique(type_isomir.species$host_id)))
+print(length(unique(type_canno.species$host_name)))
+print(length(intersect(unique(type_canno.species$host_name),unique(type_isomir.species$host_id))))
+##Same numbers, meaning we have matching correspondence between the canonical-level expression and the isomir-level
+
+## When filtering, DO NOT NORMALISE, and filter based on the isomiR expression. 
+
+run_deseq <- function(cts, coldata, phenotype, keep, row_names){
+  #print(coldata)
+  dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ phenotype)
+  dds <- DESeq(dds, quiet=TRUE)
+  dds <- dds[keep,]
+  row.names(dds) = row_names
+  res <- results(dds)
+  return(list('res' = res, 'dds' = dds, 'coldata' = coldata))
+}
+
+comp_one_run <- function(datasets_list, comp_selector) {
+  #First extract filter the datasets, + select the columns
+  isomir_dataset_nf = datasets_list[[comp_selector[['dataset_name']]]]$isomir
+  isomir_dataset_nf_norm = datasets_list[[comp_selector[['dataset_name']]]]$isomir_norm
+  cannonical_dataset_nf = datasets_list[[comp_selector[['dataset_name']]]]$cannonical
+  cannonical_dataset_norm = datasets_list[[comp_selector[['dataset_name']]]]$cannonical_norm
+  ##Filtering done BEFORE selecting the columns, getting the same isomiRs and miRNAs for each comparisons
+  #print(isomir_dataset_nf['5952',])
+  iso_filt = filt_dataset(isomir_dataset_nf, comp_selector[['threshold']], type_isomir.species, isomir_dataset_nf_norm)
+  isomir_dataset = iso_filt[[1]]
+  #print(isomir_dataset['5952',])
+  canno_filt = filt_dataset(cannonical_dataset_nf, comp_selector[['threshold']], type_canno.species, cannonical_dataset_norm)
+  cannonical_dataset_indep = canno_filt[[1]]
+  isomir_dataset = isomir_dataset[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  cannonical_dataset = cannonical_dataset_nf[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  cannonical_dataset_indep = cannonical_dataset_indep[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  cannonical_dataset = cannonical_dataset[row.names(type_canno.species[type_canno.species$host_name %in% type_isomir.species[row.names(type_isomir.species) %in% row.names(isomir_dataset),'host_id'],]),]
+  isomir_dataset = isomir_dataset[intersect(row.names(isomir_dataset),row.names(type_isomir.species[type_isomir.species$host_id %in% type_canno.species$host_name,])),]
+  
+  
+  #Create dataset for canonical_isomir
+  cannonical_isomir_dataset = datasets_list[[comp_selector[['dataset_name']]]]$isomir
+  #print(cannonical_isomir_dataset['5952',])
+  cannonical_isomir_dataset = cannonical_isomir_dataset[row.names(type_isomir.species[row.names(type_isomir.species) %in% row.names(isomir_dataset),]),]
+  cannonical_isomir_dataset = cannonical_isomir_dataset[row.names(cannonical_isomir_dataset) %in% row.names(type_isomir.species[type_isomir.species$same_seq == TRUE,]),]
+  cannonical_isomir_dataset = cannonical_isomir_dataset[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  #print(cannonical_isomir_dataset['5952',])
+  
+  
+  #Create col data
+  indexes = colnames(isomir_dataset)
+  phenotype = factor(ifelse(indexes %in% comp_selector[['pheno_list']], comp_selector[['phenotype_name']], 'Ctrl'), levels = c("Ctrl", comp_selector[['phenotype_name']]))
+  coldata = data.frame(phenotype, row.names = indexes)
+  
+  #Run deseq
+  #select columns:
+  cannonical_dataset_nf = cannonical_dataset_nf[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  isomir_dataset_nf = isomir_dataset_nf[,c(comp_selector[['control_list']], comp_selector[['pheno_list']])]
+  isomir_dataset_nf = isomir_dataset_nf[row.names(isomir_dataset_nf) %in% row.names(type_isomir.species),]
+  #print(as.matrix(isomir_dataset))
+  isomir_res = run_deseq(as.matrix(isomir_dataset_nf), coldata, 'phenotype', row.names(isomir_dataset_nf) %in% row.names(isomir_dataset), row.names(isomir_dataset))
+  cannonical_res = run_deseq(as.matrix(cannonical_dataset_nf), coldata, 'phenotype', row.names(cannonical_dataset_nf) %in%  row.names(cannonical_dataset), row.names(cannonical_dataset))
+  cannonical_indep_res = run_deseq(as.matrix(cannonical_dataset_nf), coldata, 'phenotype', row.names(cannonical_dataset_nf) %in% row.names(cannonical_dataset_indep), row.names(cannonical_dataset_indep))
+  #print(as.matrix(cannonical_isomir_dataset))
+  cannonical_isomir_res = run_deseq(as.matrix(isomir_dataset_nf), coldata, 'phenotype', row.names(isomir_dataset_nf) %in% row.names(cannonical_isomir_dataset), row.names(cannonical_isomir_dataset))
+  
+  #print('a')
+  #Normalise dataset to output it
+  isomir_dataset = 1000000 * (isomir_dataset / colSums(isomir_dataset))
+  cannonical_dataset = 1000000 * (cannonical_dataset / colSums(cannonical_dataset))
+  cannonical_dataset_indep = 1000000 * (cannonical_dataset_indep / colSums(cannonical_dataset_indep))
+  cannonical_isomir_dataset = 1000000 * (cannonical_isomir_dataset / colSums(isomir_dataset))
+  
+  return(list('isomir_res' = isomir_res, 
+              'isomir_data' = isomir_dataset,
+              'cannonical_res' = cannonical_res,
+              'cannonical_data' = cannonical_dataset,
+              'cannonical_indep_res' = cannonical_indep_res,
+              'cannonical_indep_data' = cannonical_dataset_indep,
+              'cannonical_isomir_res' = cannonical_isomir_res,
+              'cannonical_isomir_data' = cannonical_isomir_dataset,
+              'nf_iso_data' = iso_filt[[2]],
+              'selector' = comp_selector))
+}
+
+## number table from results
+numbers_calc <- function(result_one_comp) {
+  res_iso = result_one_comp$isomir_res$res
+  res_canno = result_one_comp$cannonical_res$res
+  res_canno_indep = result_one_comp$cannonical_indep_res$res
+  res_iso_canno = result_one_comp$cannonical_isomir_res$res
+  up = c()
+  up = c(up, sum((res_iso$padj < 0.05) & (res_iso$log2FoldChange > 0), na.rm = TRUE))
+  up = c(up, sum((res_canno$padj < 0.05) & (res_canno$log2FoldChange > 0), na.rm = TRUE))
+  up = c(up, sum((res_canno_indep$padj < 0.05) & (res_canno_indep$log2FoldChange > 0), na.rm = TRUE))
+  up = c(up, sum((res_iso_canno$padj < 0.05) & (res_iso_canno$log2FoldChange > 0), na.rm = TRUE))
+  #print(up)
+  down = c()
+  down = c(down, sum((res_iso$padj < 0.05) & (res_iso$log2FoldChange < 0), na.rm = TRUE))
+  down = c(down, sum((res_canno$padj < 0.05) & (res_canno$log2FoldChange < 0), na.rm = TRUE))
+  down = c(down, sum((res_canno_indep$padj < 0.05) & (res_canno_indep$log2FoldChange < 0), na.rm = TRUE))
+  down = c(down, sum((res_iso_canno$padj < 0.05) & (res_iso_canno$log2FoldChange < 0), na.rm = TRUE))
+  #print(down)
+  tot = c()
+  tot = c(tot, nrow(res_iso))
+  tot = c(tot, nrow(res_canno))
+  tot = c(tot, nrow(res_canno_indep))
+  tot = c(tot, nrow(res_iso_canno))
+  #print(tot)
+  indexes = c('isomir', 'cannonical', 'cannonical_indep', 'cannonical_isomir')
+  return(data.frame(up, down, tot, row.names = indexes))
+}
+
+##Table of fold change
+fold_table <- function(result_one_comp, canno_comp_name = 'cannonical_res') {
+  res_iso = result_one_comp$isomir_res$res
+  res_iso = res_iso[order(res_iso$pvalue),]
+  res_canno = result_one_comp[[canno_comp_name]]$res
+  if (canno_comp_name  != 'cannonical_res') {
+    res_iso = res_iso[row.names(res_iso) %in% row.names(type_isomir.species[type_isomir.species$host_id %in% type_isomir.species[row.names(type_isomir.species) %in% row.names(res_canno), 'host_id'],]),]
+  }
+  
+  indexes = row.names(res_iso)
+  canno_name = type_isomir.species[indexes, 'host_id']
+  fdr_iso = res_iso$padj
+  logfoldc_iso = res_iso$log2FoldChange
+  fdr_canno = c()
+  logfoldc_canno = c()
+  if (canno_comp_name == 'cannonical_res'){
+    for (canno_sp in canno_name) {
+      fdr_canno = c(fdr_canno, res_canno[row.names(type_canno.species[type_canno.species$host_name == canno_sp,]),'padj'])
+      logfoldc_canno = c(logfoldc_canno, res_canno[row.names(type_canno.species[type_canno.species$host_name == canno_sp,]),'log2FoldChange'])
+    }
+  } else {
+    for (canno_sp in canno_name) {
+      fdr_canno = c(fdr_canno, res_canno[row.names(type_isomir.species[(type_isomir.species$host_id == canno_sp) & (type_isomir.species$same_seq == TRUE),]),'padj'])
+      #print(res_canno[row.names(type_isomir.species[(type_isomir.species$host_id == canno_sp) & (type_isomir.species$same_seq == TRUE),]),'padj'])
+      logfoldc_canno = c(logfoldc_canno, res_canno[row.names(type_isomir.species[(type_isomir.species$host_id == canno_sp) & (type_isomir.species$same_seq == TRUE),]),'log2FoldChange'])
+    }
+  }
+  #print(length(canno_name))
+  #print(length(fdr_iso))
+  #print(length(logfoldc_iso))
+  #print(length(fdr_canno))
+  #print(length(logfoldc_canno))
+  #print(length(indexes))
+  table_res = data.frame(canno_name, fdr_iso, logfoldc_iso, fdr_canno, logfoldc_canno, row.names = indexes)
+  return(table_res)
+}
+
+##Heatmaps 
+heatmaps_res <- function(result_one_comp, title, cutoff, a_error = 0.05){
+  res_iso = result_one_comp$isomir_res$res
+  res_canno_indep = result_one_comp$cannonical_indep_res$res
+  res_iso_canno = result_one_comp$cannonical_isomir_res$res
+
+  iso_sign = res_iso[replace((res_iso$padj < a_error), is.na((res_iso$padj < a_error)), FALSE),]
+  canno_sign = res_canno_indep[replace((res_canno_indep$padj < a_error), is.na((res_canno_indep$padj < a_error)), FALSE),]
+  iso_canno_sign = res_iso_canno[replace((res_iso_canno$padj < a_error), is.na((res_iso_canno$padj < a_error)), FALSE),]
+  
+  iso_sign = iso_sign[order(iso_sign$pvalue),]
+  canno_sign = canno_sign[order(canno_sign$pvalue),]
+  iso_canno_sign = iso_canno_sign[order(iso_canno_sign$pvalue),]
+  
+  #dataset = as.matrix(result_one_comp$isomir_data[row.names(iso_sign),])
+  #my_palette <- colorRampPalette(c("blue", "white", "red"))(n = 20)
+  #heatmap.2(dataset, main = paste(title, 'isomiR', sep = ' '), trace = 'none', margins = c(7,7), col = my_palette, scale = 'row')
+  
+  #dataset = as.matrix(result_one_comp$cannonical_indep_data[row.names(canno_sign),])
+  #my_palette <- colorRampPalette(c("blue", "white", "red"))(n = 20)
+  #heatmap.2(dataset, main = paste(title, 'cannonical', sep = ' '), trace = 'none', margins = c(7,7), col = my_palette, scale = 'row')
+  
+  ntd <- normTransform(result_one_comp$isomir_res$dds)
+  cutoff_iso = ifelse(cutoff < nrow(iso_sign), cutoff, nrow(ntd))
+  pheatmap(assay(ntd)[rownames(iso_sign[1:cutoff_iso,]),], cluster_rows=TRUE, show_rownames=TRUE, scale = "row", main = paste(title, 'isomir', sep = ' '), cluster_cols=TRUE)
+  
+  ntd <- normTransform(result_one_comp$cannonical_indep_res$dds)
+  cutoff_canno = ifelse(cutoff < nrow(canno_sign), cutoff, nrow(ntd))
+  pheatmap(assay(ntd)[rownames(canno_sign[1:cutoff_canno,]),], cluster_rows=TRUE, show_rownames=TRUE, scale = "row", main = paste(title, 'canno', sep = ' '), cluster_cols=TRUE)
+  
+  ntd <- normTransform(result_one_comp$cannonical_isomir_res$dds)
+  cutoff_canno = ifelse(cutoff < nrow(iso_canno_sign), cutoff, nrow(ntd))
+  pheatmap(assay(ntd)[rownames(iso_canno_sign[1:cutoff_canno,]),], cluster_rows=TRUE, show_rownames=TRUE, scale = "row", main = paste(title, 'canno_iso', sep = ' '), cluster_cols=TRUE)
+}
+
+##Select the ones that go in opposite direction and output the table
+opposite_direction_table <- function(fold_table_res) {
+  to_add = ifelse((fold_table_res$fdr_iso < 0.05) & (fold_table_res$fdr_canno > 0.05), 'iso_only_spe', ifelse(
+    (fold_table_res$fdr_iso > 0.05) & (fold_table_res$fdr_canno < 0.05), 'canno_only_spe', ifelse(
+      (fold_table_res$fdr_iso < 0.05) & (fold_table_res$fdr_canno < 0.05) & (sign(fold_table_res$logfoldc_iso) != sign(fold_table_res$logfoldc_canno)), 'opposite_dir', 'same_signal')))
+  #to_sel = (((fold_table_res$fdr_iso < 0.05) & (fold_table_res$fdr_canno > 0.05)) |
+  #          ((fold_table_res$fdr_iso > 0.05) & (fold_table_res$fdr_canno < 0.05)) |
+  #          (fold_table_res$fdr_iso < 0.05) & (fold_table_res$fdr_canno < 0.05) & (sign(fold_table_res$logfoldc_iso) != sign(fold_table_res$logfoldc_canno)))
+  fold_table_res[['class_comparison']] = to_add
+  return(fold_table_res[order(fold_table_res$class_comparison),])
+}
+
+##Logfold scatter plot
+logfolc_plot <- function(fold_table_res, title = '') {
+  plot = ggplot(na.omit(fold_table_res), aes(x=logfoldc_iso, y=logfoldc_canno, color = canno_name)) + geom_point() + theme(legend.position = "none") + ggtitle(title) + ylab('logfoldc_conv')
+  multiplot(plot, cols = 1)
+}
+
+logfolc_plot_seperate <- function(fold_table_res, title = '') {
+  plots = {}
+  #print(unique(fold_table_res$class_comparison))
+  fold_table_res = na.omit(fold_table_res)
+  for (comp in unique(fold_table_res$class_comparison)) {
+    comp_name = list(
+      'iso_only_spe' = 'isomiR-exclusive significance',
+      'canno_only_spe' = 'canonical-exclusive significance',
+      'opposite_dir' = 'opposite significant singal',
+      'same_signal' = 'same signal'
+    )
+    if(nrow(fold_table_res[fold_table_res$class_comparison == comp,]) >= 1) {
+      plots[[comp]] = ggplot(na.omit(fold_table_res[fold_table_res$class_comparison == comp,]), aes(x=logfoldc_iso, y=logfoldc_canno, color = canno_name)) + geom_point() + theme(legend.position = "none") + ggtitle(comp_name[comp]) + ylab('logfoldc_conv')
+    }
+  }
+  multiplot(plotlist = plots, cols=2)
+}
+
+
+#Comp_selector "dataset_name" "control_list" "pheno_list" "phenotype_name" "comp_title" "threshold"
+
+
+
+
+## Columns shortcuts
+Senescence_s0 = c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3')
+Senescence_s1 = c('senescence_s1_don1', 'senescence_s1_don2', 'senescence_s1_don3', 'senescence_s1_don4')
+Senescence_s2 = c('senescence_s2_don1', 'senescence_s2_don2', 'senescence_s2_don3', 'senescence_s2_don4')
+Senescence_s3 = c('senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', 'senescence_s3_don4')
+HUVEC_notx = c('miRNA_HUVEC_notx_rep2', 'miRNA_HUVEC_notx_rep3')
+HUVEC_hypo = c('miRNA_HUVEC_hypo_rep2', 'miRNA_HUVEC_hypo_rep3')
+HUVEC_OxP = c('miRNA_HUVEC_OxP_rep2', 'miRNA_HUVEC_OxP_rep3')
+HUVEC_hypoOxP = c('miRNA_HUVEC_hypoOxP_rep2', 'miRNA_HUVEC_hypoOxP_rep3')
+N_NT = c('N_NT_1_S1', 'N_NT_2_S2', 'N_NT_3_S3')
+N_7 = c('N_7_1_S4', 'N_7_2_S5', 'N_7_3_S6')
+N_24 = c('N_24_1_S7', 'N_24_2_S8', 'N_24_3_S9')
+C_NT = c('C_NT_1_S10', 'C_NT_2_S11', 'C_NT_3_S12')
+C_7 = c('C_7_1_S13', 'C_7_2_S14', 'C_7_3_S15')
+C_24 = c('C_24_1_S16', 'C_24_2_S17', 'C_24_3_S18')
+
+
+## Prepare for covariance
+
+co.var <- function(x) ( sd(x)/mean(x) )
+
+cov_distrib = function(condition_iso, condition_canno) {
+  sel_iso = type_isomir.species[row.names(type_isomir.species) %in% row.names(condition_iso),]
+  sel_iso = sel_iso[sel_iso$host_id %in% unique(type_canno.species[row.names(condition_canno),'host_name']),]
+  cov_iso = c()
+  cov_canno = c()
+  mirna = c()
+  type = c()
+  mean_exp = c()
+  for (cov_sp in row.names(sel_iso)) {
+    canno_sp = sel_iso[cov_sp, 'host_id']
+    cov_iso = c(cov_iso, co.var(as.numeric(as.vector(condition_iso[cov_sp,]))))
+    type = c(type, sel_iso[cov_sp, 'isomir_type'])
+    mean_exp = c(mean_exp, rowMeans(condition_iso[cov_sp,]))
+    cov_canno = c(cov_canno, co.var(as.numeric(as.vector(condition_canno[row.names(type_canno.species[type_canno.species$host_name==canno_sp,]),]))))
+    mirna = c(mirna, canno_sp)
+  }
+  df = data.frame(cov_iso, cov_canno, mirna, type, mean_exp)
+  row.names(df) = row.names(sel_iso)
+  return(df)
+}
+
+
+normalize_and_select <- function(dataset, threshold, norm = TRUE, isomir_only = FALSE, norm_isomir = FALSE) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalise then filter
+  if (isomir_only) {
+    dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset = norm_isomir
+      dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+      dataset = 1000000 * (dataset / colSums(dataset))
+    }
+    dataset = dataset[((rowSums(dataset)/ncol(dataset)) >= threshold),]
+  } else {
+    dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset$isomir = dataset$isomir_norm
+      dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+      dataset$cannonical = dataset$cannonical_norm
+    }
+    dataset$isomir = dataset$isomir[((rowSums(dataset$isomir)/ncol(dataset$isomir)) >= threshold),]
+    #Same for the cannonical
+    dataset$cannonical = dataset$cannonical[((rowSums(dataset$cannonical)/ncol(dataset$cannonical)) >= threshold),]
+  }
+  return(dataset)
+}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+cov_table = function(res_table, dataset, selector) {
+  dataset_pheno_iso = dataset$isomir[row.names(res_table), selector[['pheno_list']]]
+  dataset_control_iso = dataset$isomir[row.names(res_table), selector[['control_list']]]
+  dataset_pheno_canno = dataset$cannonical[, selector[['pheno_list']]]
+  dataset_control_canno = dataset$cannonical[, selector[['control_list']]]
+  cov_pheno = cov_distrib(dataset_pheno_iso, dataset_pheno_canno)
+  cov_control = cov_distrib(dataset_control_iso, dataset_control_canno)
+  table_out = res_table
+  table_out[row.names(cov_pheno), 'cov_pheno_iso'] = cov_pheno$cov_iso
+  table_out[row.names(cov_pheno), 'cov_pheno_canno'] = cov_pheno$cov_canno
+  table_out[row.names(cov_pheno), 'mean_pheno'] = cov_pheno$mean_exp
+  table_out[row.names(cov_control), 'cov_ctrl_iso'] = cov_control$cov_iso
+  table_out[row.names(cov_control), 'cov_ctrl_canno'] = cov_control$cov_canno
+  table_out[row.names(cov_control), 'mean_ctrl'] = cov_control$mean_exp
+  return(table_out)
+}
+
+
+
+
+
+
+```
+
+## miRNA proportion exploration
+
+
+```{r}
+datasets_analysis$`Senescence dataset`$isomir[row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p",]) ,]
+
+  test = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-30a-5p",]), row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir)),]
+
+
+test = datasets_analysis$`Senescence dataset`$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p",]), row.names(datasets_analysis_normalized$`Senescence dataset`$isomir)),]
+
+#write.table(test, "../../MANUSCRIPT_isomiR/test.csv", sep = "\t", row.names = FALSE)
+
+data = test
+
+test = data
+
+test = t(t(test) / colSums(test))
+
+t.test(test['48566', Senescence_s0], test['48566', Senescence_s3])
+
+for (x in row.names(test)) {
+  print(x)
+  print(t.test(test[x, Senescence_s0], test[x, Senescence_s3]))
+}
+
+prop = c()
+isomir = c()
+stage = c()
+
+for (column in colnames(test)){
+  prop = c(prop, test[,column])
+  isomir = c(isomir, row.names(test))
+  stage = c(stage, rep(paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]), nrow(test)))
+}
+df = data.frame(isomir, prop, stage)
+
+ggplot(df, aes(x=isomir, y=prop, fill=stage)) +
+  geom_boxplot()
+
+library(ggpubr)
+
+ggerrorplot(df, x = "isomir", y = "prop", 
+            desc_stat = "mean_sd", 
+            color = "stage", palette = "jco",
+            position = position_dodge(0.3)     # Adjust the space between bars
+            )
+
+
+## Two big iso
+
+prop_list = test
+
+test = prop_list
+#test = test[c("138070", "138094"),]
+
+prop = c()
+isomir = c()
+stage = c()
+
+for (column in colnames(test)){
+  prop = c(prop, test[,column])
+  isomir = c(isomir, row.names(test))
+  stage = c(stage, rep(paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]), nrow(test)))
+}
+df = data.frame(isomir, prop, stage)
+
+ggplot(df, aes(x=isomir, y=prop, fill=stage)) +
+  geom_boxplot()
+
+library(ggpubr)
+
+ggerrorplot(df, x = "isomir", y = "prop", 
+            desc_stat = "mean_sd", 
+            color = "stage", palette = "jco",
+            position = position_dodge(0.3)     # Adjust the space between bars
+            )
+
+
+## The rest
+
+test = prop_list
+test = test[!(row.names(test) %in% c("138070", "138094")),]
+
+prop = c()
+isomir = c()
+stage = c()
+
+for (column in colnames(test)){
+  prop = c(prop, test[,column])
+  isomir = c(isomir, row.names(test))
+  stage = c(stage, rep(paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]), nrow(test)))
+}
+df = data.frame(isomir, prop, stage)
+
+ggplot(df, aes(x=isomir, y=prop, fill=stage)) +
+  geom_boxplot()
+
+library(ggpubr)
+
+ggerrorplot(df, x = "isomir", y = "prop", 
+            desc_stat = "mean_sd", 
+            color = "stage", palette = "jco",
+            position = position_dodge(0.3)     # Adjust the space between bars
+            )
+
+
+
+
+
+
+```
+
+##ANOVA testing
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(broom)
+library(AICcmodavg)
+
+test = prop_list
+
+test = test["48566",]
+
+prop = c()
+stage = c()
+
+for (column in names(test)){
+  prop = c(prop, test[column])
+  stage = c(stage, strsplit(column, "_")[[1]][2])
+}
+df = data.frame(prop, stage)
+
+one.way <- aov(prop ~ stage, data = df)
+summary(one.way)
+
+par(mfrow=c(2,2))
+plot(one.way)
+par(mfrow=c(1,1))
+
+tukey.two.way<-TukeyHSD(one.way)
+
+tukey.two.way
+
+anova_result = summary(one.way)
+anova_result[[1]]$`Pr(>F)`[[1]]
+
+##For all
+
+test_all = prop_list
+for (x in row.names(test_all)) {
+  print(x)
+  test = test_all[x,]
+  prop = c()
+  stage = c()
+  for (column in names(test)){
+    prop = c(prop, test[column])
+    stage = c(stage, strsplit(column, "_")[[1]][2])
+  }
+  df = data.frame(prop, stage)
+  one.way <- aov(prop ~ stage, data = df)
+  #print(t.test(test_all[x, Senescence_s0], test_all[x, Senescence_s3]))
+  print(summary(one.way))
+  par(mfrow=c(2,2))
+  plot(one.way)
+  par(mfrow=c(1,1))
+  tukey.two.way<-TukeyHSD(one.way)
+  print(tukey.two.way)
+}
+
+```
+
+
+## Kruskal-Wallis Test
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(broom)
+library(AICcmodavg)
+
+test = prop_list
+
+test = test["48566",]
+
+prop = c()
+stage = c()
+
+for (column in names(test)){
+  prop = c(prop, test[column])
+  stage = c(stage, strsplit(column, "_")[[1]][2])
+}
+df = data.frame(prop, stage)
+
+one.way <- aov(prop ~ stage, data = df)
+
+#one.way <- kruskal.test(prop ~ stage, data = df)
+
+```
+
+
+
+
+
+##Anova for all isomiRs (senscence) test randomisation parametric
+
+```{r}
+
+mir_list = type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir),"host_id"]
+mir_list = unique(mir_list)
+
+test_col_rand = test_col
+
+test_col_rand = sample(test_col)
+
+
+
+
+p_val = c()
+iso_id = c()
+for(mir in mir_list) {
+  data = datasets_analysis$`Senescence dataset`$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir,]), row.names(datasets_analysis_normalized$`Senescence dataset`$isomir)),]
+  data = t(t(data) / colSums(data))
+  for (x in row.names(data)) {
+    test = data[x,]
+    prop = c()
+    stage = c()
+    for (column in names(test)){
+      prop = c(prop, test[column])
+      stage = c(stage, strsplit(column, "_")[[1]][2])
+    }
+    df = data.frame(prop, test_col_rand)
+    #one.way <- aov(prop ~ stage, data = df)
+    #anova_result = summary(one.way)
+    #p_val = c(p_val, anova_result[[1]]$`Pr(>F)`[[1]])
+    one.way <- kruskal.test(prop ~ test_col_rand, data = df)
+    p_val = c(p_val, one.way$p.value)
+    iso_id = c(iso_id, x)
+  }
+}
+
+df = data.frame(iso_id, p_val)
+df = na.omit(df)
+
+sum(df$p_val < 0.05)
+sum(df$p_val < 0.05 / nrow(df))
+
+hist(-log(df$p_val))
+
+```
+
+
+##Anova for all isomiRs (nucleus)
+
+```{r}
+library(FSA)
+
+diff_exp = function(dataset, subset_sel = FALSE, subset) {
+  mir_list = type_isomir.species[row.names(datasets_analysis_normalized[[dataset]]$isomir),"host_id"]
+  mir_list = names(table(mir_list))[table(mir_list) > 1]
+  p_val = c()
+  iso_id = c()
+  mir_id = c()
+  stage = c()
+  if (subset_sel) {
+    test = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p", ]), row.names(datasets_analysis_normalized[[dataset]]$isomir)), subset]
+  } else {
+    test = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p",]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+  }
+  for (column in names(test)){
+        stage = c(stage, paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]))
+      }
+  #stage = sample(stage)
+  for(mir in mir_list) {
+    if (subset_sel) {
+      data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir, ]), row.names(datasets_analysis_normalized[[dataset]]$isomir)), subset]
+    } else {
+      data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir,]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+    }
+    data = t(t(data) / colSums(data))
+    for (x in row.names(data)) {
+      test = data[x,]
+      prop = c()
+      for (column in names(test)){
+        prop = c(prop, test[column])
+      }
+      df = data.frame(prop, stage)
+      one.way <- aov(prop ~ stage, data = df)
+      anova_result = summary(one.way)
+      p_val = c(p_val, anova_result[[1]]$`Pr(>F)`[[1]])
+      iso_id = c(iso_id, x)
+      mir_id = c(mir_id, mir)
+    }
+  }
+  df = data.frame(iso_id, p_val, mir_id)
+  df = na.omit(df)
+  df$BH =
+        p.adjust(df$p_val,
+                 method = "BH")
+  sum(df$p_val < 0.05)
+  sum(df$p_val < 0.05 / nrow(df))
+  sum(df$BH < 0.05)
+  nrow(df)
+  df[["minlogcorrp"]] = -log(df$BH)
+  return(df)
+}
+
+df_nucl = diff_exp("Nucleus vs. cytoplasm")
+df_sene = diff_exp("Senescence dataset")
+df = df_nucl
+
+df = df_sene
+df["num_mir"] = table(df$mir_id)[df$mir_id]
+df$mir_id = factor(df$mir_id, levels = unique(df[order(df$num_mir, decreasing = TRUE),"mir_id"]))
+df["diff"] = df$BH < 0.05
+sum_mirsign = lapply(levels(df$mir_id), function(mir) {sum(df[df$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df$mir_id)
+df["mir_diff"] = as.vector(sum_mirsign[df$mir_id]) > 0 
+df["mir_diff_num"] = unlist(sum_mirsign[df$mir_id])
+df["mir_diff_prop"] = df$mir_diff_num / df$num_mir
+ggplot(df, aes(x=mir_id, y=minlogcorrp, color= mir_diff)) + geom_point() + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90)) + scale_fill_manual(values=c("#009E73", "#E69F00", "#CC79A7"))
+
+df = df_nucl
+df["num_mir"] = table(df$mir_id)[df$mir_id]
+df$mir_id = factor(df$mir_id, levels = unique(df[order(df$num_mir, decreasing = TRUE),"mir_id"]))
+df["diff"] = df$BH < 0.05
+sum_mirsign = lapply(levels(df$mir_id), function(mir) {sum(df[df$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df$mir_id)
+df["mir_diff"] = as.vector(sum_mirsign[df$mir_id]) > 0 
+df["mir_diff_num"] = unlist(sum_mirsign[df$mir_id])
+df["mir_diff_prop"] = df$mir_diff_num / df$num_mir
+ggplot(df, aes(x=mir_id, y=minlogcorrp, color= mir_diff)) + geom_point() + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90)) + scale_fill_manual(values=c("#009E73", "#E69F00", "#CC79A7"))
+
+
+#hist(-log(df$BH), breaks = 20)
+
+ggplot(data=df_nucl, aes(minlogcorrp)) + 
+  geom_histogram(aes(y =..density..), 
+                 breaks=seq(0, 20, by = 0.4), 
+                 fill="grey") + 
+  geom_density(col=2) + 
+  labs(title="Results of proportion differences: Compartment dataset") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))
+
+ggplot(data=df_sene, aes(minlogcorrp)) + 
+  geom_histogram(aes(y =..density..), 
+                 breaks=seq(0, 14, by = 0.3), 
+                 fill="grey") + 
+  geom_density(col=2) + 
+  labs(title="Results of proportion differences: Senescence") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))
+
+ggplot(data=df_sene, aes(minlogcorrp)) + 
+  geom_histogram(breaks=seq(0, 20, by = 0.4), 
+                 fill="grey") +
+  labs(title="Results of proportion differences") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))+ ylim(0, 120)
+
+barplot(table(type_isomir.species[df[df$BH < 0.05,'iso_id'], "isomir_type"]), main = "Number of changing isomiRs in compartment dataset")
+barplot(table(type_isomir.species[df[df$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df[,'iso_id'], "isomir_type"]), main = "Proportion of changing isomiRs in compartment dataset")
+
+barplot(table(type_isomir.species[df_sene[df_sene$BH < 0.05,'iso_id'], "isomir_type"]), main = "Number of changing isomiRs in senescence dataset")
+barplot(table(type_isomir.species[df_sene[df_sene$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df_sene[,'iso_id'], "isomir_type"]), main = "Proportion of changing isomiRs in senescence dataset")
+
+#df_nucl = df
+
+df = df_sene
+df["num_mir"] = table(df$mir_id)[df$mir_id]
+df$mir_id = factor(df$mir_id, levels = unique(df[order(df$num_mir, decreasing = TRUE),"mir_id"]))
+df["diff"] = df$BH < 0.05
+sum_mirsign = lapply(levels(df$mir_id), function(mir) {sum(df[df$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df$mir_id)
+df["mir_diff"] = as.vector(sum_mirsign[df$mir_id]) > 0 
+df["mir_diff_num"] = unlist(sum_mirsign[df$mir_id])
+df["mir_diff_prop"] = df$mir_diff_num / df$num_mir
+df["class"] = ifelse((df$diff), "fdr < 0.05", ifelse(df$mir_diff, "fdr > 0.05", "no diff for mir"))
+ggplot(df, aes(x=mir_id, y=minlogcorrp, color= class)) + geom_point(size = 1) + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90)) + scale_color_manual(values=c("#009E73", "#E69F00", "#CC79A7"))
+
+df = df_nucl
+df["num_mir"] = table(df$mir_id)[df$mir_id]
+df$mir_id = factor(df$mir_id, levels = unique(df[order(df$num_mir, decreasing = TRUE),"mir_id"]))
+df["diff"] = df$BH < 0.05
+sum_mirsign = lapply(levels(df$mir_id), function(mir) {sum(df[df$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df$mir_id)
+df["mir_diff"] = as.vector(sum_mirsign[df$mir_id]) > 0 
+df["mir_diff_num"] = unlist(sum_mirsign[df$mir_id])
+df["mir_diff_prop"] = df$mir_diff_num / df$num_mir
+df["class"] = ifelse((df$diff), "fdr < 0.05", ifelse(df$mir_diff, "fdr > 0.05", "no diff for mir"))
+ggplot(df, aes(x=mir_id, y=minlogcorrp, color= class)) + geom_point() + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90)) + scale_color_manual(values=c("#009E73", "#E69F00", "#CC79A7"))
+
+
+##Take close look at isomiR species level discrimination of p-value. 
+barplot(table(type_isomir.species[df[df$BH < 0.05,'iso_id'], "isomir_type"]))
+barplot(table(type_isomir.species[df[df$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df[,'iso_id'], "isomir_type"]))
+
+
+df["num_mir"] = table(df$mir_id)[df$mir_id]
+df$mir_id = factor(df$mir_id, levels = unique(df[order(df$num_mir, decreasing = TRUE),"mir_id"]))
+
+df["diff"] = df$BH < 0.05
+sum_mirsign = lapply(levels(df$mir_id), function(mir) {sum(df[df$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df$mir_id)
+df["mir_diff"] = as.vector(sum_mirsign[df$mir_id]) > 0 
+df["mir_diff_num"] = unlist(sum_mirsign[df$mir_id])
+df["mir_diff_prop"] = df$mir_diff_num / df$num_mir
+
+
+ggplot(data=df[!duplicated(df[,'mir_id']),], aes(mir_diff_num)) + 
+  geom_histogram(breaks=seq(0, 70, by = 1), 
+                 fill="grey") +
+  labs(title="Number of isomiRs with changing proprotions") +
+  labs(x="Num of isomir", y="number of mirna")
+
+ggplot(data=df[!duplicated(df[,'mir_id']),], aes(mir_diff_prop)) + 
+  geom_histogram(breaks=seq(0, 1, by = 0.05), 
+                 fill="grey") +
+  labs(title="Proportion of isomiRs with distribution changes for each miRNA in Senescence dataset") +
+  labs(x="Proportion of isomir", y="number of mirna")
+
+mir_int = 'hsa-miR-30d-5p'
+dataset = 'Senescence dataset' 
+
+plot_example_mirna = function(mir_int, dataset) {
+  data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir_int,]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+  test = t(t(data) / colSums(data))
+  #test = log(test)
+  prop = c()
+  isomir = c()
+  stage = c()
+  for (column in colnames(test)){
+    prop = c(prop, test[,column])
+    isomir = c(isomir, row.names(test))
+    stage = c(stage, rep(paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]), nrow(test)))
+  }
+  df = data.frame(isomir, prop, stage)
+  ggplot(df, aes(x=isomir, y=prop, fill=stage)) +
+    geom_boxplot()  + scale_y_continuous(trans='log10')
+}
+
+plot_example_mirna(mir_int, "Senescence dataset")
+plot_example_mirna(mir_int, "Nucleus vs. cytoplasm")
+
+df_nucl = diff_exp("Nucleus vs. cytoplasm")
+df_sene = diff_exp("Senescence dataset")
+df_nucl_nucleus = diff_exp("Nucleus vs. cytoplasm", subset_sel = TRUE, c(N_NT, N_7, N_24))
+df_nucl_cytoplasm = diff_exp("Nucleus vs. cytoplasm", subset_sel = TRUE, c(N_NT, N_7, N_24))
+df_nucl_NT = diff_exp("Nucleus vs. cytoplasm", subset_sel = TRUE, c(N_NT, C_NT))
+df_nucl_24 = diff_exp("Nucleus vs. cytoplasm", subset_sel = TRUE, c(N_24, C_24))
+
+
+senescence_changes = df_sene[df_sene$p_val < 0.05, "iso_id"]
+compartment_hypoxia_changes = df_nucl[df_nucl$p_val < 0.05, "iso_id"]
+hypoxia_nucleus_changes = df_nucl_nucleus[df_nucl_nucleus$p_val < 0.05, "iso_id"]
+hypoxia_cytoplasm_changes = df_nucl_cytoplasm[df_nucl_cytoplasm$p_val < 0.05, "iso_id"]
+NT_compartment_changes = df_nucl_NT[df_nucl_NT$p_val < 0.05, "iso_id"]
+h24_compartment_changes = df_nucl_24[df_nucl_24$p_val < 0.05, "iso_id"]
+
+iso = unique(c(senescence_changes, compartment_hypoxia_changes, hypoxia_nucleus_changes, hypoxia_cytoplasm_changes, NT_compartment_changes, h24_compartment_changes))
+
+senescence_changes = iso %in% senescence_changes
+compartment_hypoxia_changes = iso %in% compartment_hypoxia_changes
+hypoxia_nucleus_changes = iso %in% hypoxia_nucleus_changes
+hypoxia_cytoplasm_changes = iso %in% hypoxia_cytoplasm_changes
+NT_compartment_changes = iso %in% NT_compartment_changes
+h24_compartment_changes = iso %in% h24_compartment_changes
+
+sets = data.frame(senescence_changes, compartment_hypoxia_changes, hypoxia_nucleus_changes, hypoxia_cytoplasm_changes, NT_compartment_changes, h24_compartment_changes)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 30, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+
+
+```
+
+
+
+
+
+
+```{r}
+
+##SCRAP CODE
+
+##Supplementary on coef of variation on proportion
+
+coeff_var = function(dataset) {
+  mir_list = type_isomir.species[row.names(datasets_analysis_normalized[[dataset]]$isomir),"host_id"]
+  mir_list = names(table(mir_list))[table(mir_list) > 1]
+  stage = c()
+  iso_id = c()
+  mir_id = c()
+  phenotype = c()
+  coeff = c()
+  coeff_all = c()
+  test = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p",]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+  for (column in names(test)){
+        stage = c(stage, paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]))
+  }
+  stages = unique(stage)
+  #stage = sample(stage)
+  for(mir in mir_list) {
+    data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir,]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+    data = t(t(data) / colSums(data))
+    for (x in row.names(data)) {
+      test = data[x,]
+      prop = c()
+      for (column in names(test)){
+        prop = c(prop, test[column])
+      }
+      df = data.frame(prop, stage)
+      for (condition in stages) {
+        phenotype = c(phenotype, condition)
+        coeff = c(coeff, co.var(df[df$stage == condition,"prop"]))
+      }
+      coeff_all = c(coeff_all, rep(co.var(df[,"prop"]), length(stages)))
+      iso_id = c(iso_id, rep(x, length(stages)))
+      mir_id = c(mir_id, rep(mir, length(stages)))
+    }
+  }
+  df = data.frame(iso_id, mir_id, phenotype, coeff, coeff_all)
+  df["type_iso"] = type_isomir.species[df$iso_id, "isomir_type"]
+  return(df)
+}
+
+df_nucl = coeff_var("Nucleus vs. cytoplasm")
+df_sene = coeff_var("Senescence dataset")
+
+df_sene_all = df_sene[!duplicated(df_sene[,'iso_id']),]
+df_sene_all["coeff"] = df_sene_all$coeff_all
+df_sene_all["phenotype"] = rep("all", nrow(df_sene_all))
+df_nucl_all = df_nucl[!duplicated(df_nucl[,'iso_id']),]
+df_nucl_all["coeff"] = df_nucl_all$coeff_all
+df_nucl_all["phenotype"] = rep("all", nrow(df_nucl_all))
+
+ggplot() +
+    geom_boxplot(data = df_sene, aes(x=phenotype, y=coeff)) + geom_boxplot(data = df_sene_all, aes(x = phenotype, y = coeff)) +
+  labs(title="Compartment dataset") + labs(y= "Coefficient of variation of isomiR proportion")
+ggplot() +
+    geom_boxplot(data = df_nucl, aes(x=phenotype, y=coeff)) + geom_boxplot(data = df_nucl_all, aes(x = phenotype, y = coeff)) + 
+  labs(title="Senescence dataset") + labs(y= "Coefficient of variation of isomiR proportion")
+
+ggplot() +
+    geom_boxplot(data = df_sene, aes(x=phenotype, y=coeff, color = type_iso)) + geom_boxplot(data = df_sene_all, aes(x = phenotype, y = coeff, color = type_iso)) + 
+  labs(title="Compartment dataset") + labs(y= "Coefficient of variation of isomiR proportion")
+ggplot() +
+    geom_boxplot(data = df_nucl, aes(x=phenotype, y=coeff, color = type_iso)) + geom_boxplot(data = df_nucl_all, aes(x = phenotype, y = coeff, color = type_iso)) + 
+   labs(title="Senescence dataset") + labs(y= "Coefficient of variation of isomiR proportion")
+
+ggplot(df_nucl, aes(x=coeff, y=coeff_all, color=phenotype)) +
+  geom_point() + geom_abline(intercept = 0, slope = 1) + 
+  labs(title="Compartment dataset") + labs(x = "coefficient within phenotype", y= "Coefficiant for all samples")
+ggplot(df_sene, aes(x=coeff, y=coeff_all, color=phenotype)) +
+  geom_point() + geom_abline(intercept = 0, slope = 1) + 
+  labs(title="Senescence dataset") + labs(x = "coefficient within phenotype", y= "Coefficiant for all samples")
+
+sum((df_nucl$coeff_all - df_nucl$coeff) > 0) / nrow(df_nucl)
+sum(na.omit((df_sene$coeff_all - df_sene$coeff) > 0)) / nrow(df_sene)
+
+diff_nucl = df_nucl$coeff_all - df_nucl$coeff
+iso_id = df_nucl$iso_id
+df_diff_nucl = data.frame(diff_nucl, iso_id)
+df_diff_nucl[["dataset"]] = rep("Compartment", length(diff_nucl))
+df_diff_nucl = na.omit(df_diff_nucl)
+diff_sene = df_sene$coeff_all - df_sene$coeff
+iso_id = df_sene$iso_id
+df_diff_sene = data.frame(diff_sene, iso_id)
+df_diff_sene[["dataset"]] = rep("Senescence", length(diff_sene))
+df_diff_sene = na.omit(df_diff_sene)
+
+df_nucl_differential = diff_exp("Nucleus vs. cytoplasm")
+df_sene_differential = diff_exp("Senescence dataset")
+row.names(df_nucl_differential) = df_nucl_differential$iso_id
+row.names(df_sene_differential) = df_sene_differential$iso_id
+df_nucl_differential[["sign"]] = df_nucl_differential$BH < 0.05
+df_sene_differential[["sign"]] = df_sene_differential$BH < 0.05
+
+df_diff_nucl[["sign"]] = df_nucl_differential[df_diff_nucl$iso_id, "sign"]
+df_diff_sene[["sign"]] = df_sene_differential[df_diff_sene$iso_id, "sign"]
+
+
+ggplot() +
+    geom_boxplot(data = df_diff_nucl, aes(x=dataset, y=diff_nucl, color = sign)) + geom_boxplot(data = df_diff_sene, aes(x = dataset, y = diff_sene, color = sign)) + 
+   labs(x = "Dataset", y= "Difference of variation coefficient between phenotype and all samples")
+
+#breaks=seq(-1.5, 2.5, by = 0.1),
+
+ggplot(data=df_diff_nucl, aes(x = diff_nucl, color = sign)) +
+  geom_histogram(fill="white", breaks=seq(-0.7, 2.5, by = 0.005)) +
+  labs(title="Covariance difference - Compartment dataset") +
+  labs(x="Difference in coefficient of variation", y="Num of isomiRs")
+
+ggplot(data=df_diff_sene, aes(x = diff_sene, color = sign)) +
+  geom_histogram(fill="white", breaks=seq(-0.7, 2.5, by = 0.005),) +
+  labs(title="Covariance difference - Senescence dataset") + 
+  labs(x="Difference in coefficient of variation", y="Num of isomiRs")
+
+ggplot(data=df_diff_nucl, aes(x = diff_nucl, color = sign)) + 
+  geom_histogram(aes(y =..density..), 
+                 breaks=seq(-0.7, 2.5, by = 0.005), 
+                 fill="white") + 
+  geom_density(col=2) + 
+  labs(title="Covariance difference - Compartment dataset") +
+  labs(x="Difference in coefficient of variation", y="Density") + geom_vline(xintercept=0)
+
+ggplot(data=df_diff_sene, aes(x = diff_sene, color = sign)) + 
+  geom_histogram(aes(y =..density..), 
+                 breaks=seq(-0.7, 2.5, by = 0.005), 
+                 fill="white") + 
+  geom_density(col=2) + 
+  labs(title="Covariance difference - Senescence dataset") +
+  labs(x="Difference in coefficient of variation", y="Density") + geom_vline(xintercept=0)
+
+```
+
+
+
+
+
+
+
+## Test for DESEq normalisation ## To check maybe ?
+```{r}
+library(FSA)
+
+data_iso = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[row.names(datasets_analysis$`Nucleus vs. cytoplasm`$isomir) %in% row.names(type_isomir.species),]
+samples = colnames(data_iso)
+coldata = data.frame(samples)
+dds <- DESeqDataSetFromMatrix(as.matrix(data_iso), colData = coldata, design = ~1)
+dds <- DESeq(dds)
+dds <- dds[row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir),]
+row.names(dds) = row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir)
+
+View(assay(dds))
+normalized_counts <- counts(dds, normalized=TRUE)
+View(normalized_counts)
+
+
+
+mir_list = type_isomir.species[row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir),"host_id"]
+mir_list = names(table(mir_list))[table(mir_list) > 1]
+
+p_val = c()
+iso_id = c()
+
+stage = c()
+for (column in colnames(normalized_counts)){
+  stage = c(stage, paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]))
+}
+#stage = sample(stage)
+normalized_counts = as.data.frame(normalized_counts)
+
+for(mir in mir_list) {
+  data = normalized_counts[row.names(normalized_counts) %in% row.names(type_isomir.species[type_isomir.species$host_id == mir,]),]
+  data = t(t(data) / colSums(data))
+  for (x in row.names(data)) {
+    test = data[x,]
+    prop = c()
+    for (column in names(test)){
+      prop = c(prop, test[column])
+    }
+    df = data.frame(prop, stage)
+    one.way <- aov(prop ~ stage, data = df)
+    anova_result = summary(one.way)
+    p_val = c(p_val, anova_result[[1]]$`Pr(>F)`[[1]])
+    iso_id = c(iso_id, x)
+  }
+}
+
+df = data.frame(iso_id, p_val)
+df = na.omit(df)
+df$BH =
+      p.adjust(df$p_val,
+               method = "BH")
+
+sum(df$p_val < 0.05)
+sum(df$p_val < 0.05 / nrow(df))
+sum(df$BH < 0.05)
+nrow(df)
+
+
+hist(-log(df$p_val))
+
+```
+
+
+
+## Run test
+
+```{r test_sample}
+
+
+#t <- c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3', 'senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', #'senescence_s3_don4')
+#a <- sample(t, 5)
+#b <- setdiff(t, a)
+
+#for (i in 1:20){
+#  print(i)
+#  for (a in 2:5){
+#    print(a)
+#    Senescence_s0 <- sample(t, a)
+#    Senescence_s3 <- setdiff(t, Senescence_s0)
+#    print(Senescence_s0)
+#    print(Senescence_s3)
+#    selector_example = list(
+#      'dataset_name' = 'Senescence dataset',
+#      'control_list' = c(Senescence_s0),
+#      'pheno_list' = c(Senescence_s3),
+#      'phenotype_name' = 'Senescence_late_stage',
+#      'comp title' = 'S3vsS0',
+#      'threshold' = 20)
+#    test_res = comp_one_run(datasets_analysis, selector_example)
+#    numbers = numbers_calc(test_res)
+#    print('num')
+#    print(numbers)
+#  }
+#}
+
+selector_example = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late_stage',
+    'comp title' = 'S3vsS0',
+    'threshold' = 20)
+
+test_res = comp_one_run(datasets_analysis, selector_example)
+numbers = numbers_calc(test_res)
+table_res = fold_table(test_res)
+#heatmaps_res(test_res, 'test', cutoff = 25, a_error = 1)
+table_res = opposite_direction_table(table_res)
+table_res = cov_table(table_res, datasets_analysis_normalized[[selector_example$dataset_name]], selector_example)
+logfolc_plot(table_res)
+logfolc_plot_seperate(table_res)
+#table_res_canno_iso = fold_table(test_res, 'cannonical_isomir_res')
+#table_res_canno_iso = opposite_direction_table(table_res_canno_iso)
+#logfolc_plot(table_res_canno_iso)
+#logfolc_plot_seperate(table_res_canno_iso)
+
+
+
+
+
+
+
+
+#view(numbers)
+#view(table_res)
+ggplot(table_res,aes(x=cov_pheno_iso, y=cov_ctrl_iso, color=class_comparison)) +
+  geom_point()
+
+table_only = table_res[table_res$class_comparison=='iso_only_spe',]
+table_only['lfc_diff'] = abs(table_only$logfoldc_iso) - abs(table_only$logfoldc_canno)
+table_only = transform(table_only, min_cov_iso = pmin(cov_ctrl_iso, cov_pheno_iso))
+table_only = transform(table_only, max_cov_canno = pmax(cov_ctrl_canno, cov_pheno_canno))
+
+#table_only = table_only[table_only$lfc_diff < 0.5,]
+
+ggplot(table_only,aes(x=min_cov_iso, y=max_cov_canno, color = lfc_diff)) +
+  geom_point()
+
+table_only['diff_cov'] = table_only$max_cov_canno - table_only$min_cov_iso
+ggplot(table_only,aes(x=diff_cov, y=lfc_diff, color = lfc_diff)) +
+  geom_point()
+
+table_only['cov_iso'] = table_only$cov_pheno_iso + table_only$cov_ctrl_canno
+table_only['cov_canno'] = table_only$cov_pheno_canno + table_only$cov_ctrl_canno
+
+ggplot(table_only,aes(x=cov_iso, y=cov_canno, color = lfc_diff)) +
+  geom_point() + geom_abline(intercept = 0, slope = 1)
+
+ggplot(table_only,aes(x=cov_pheno_iso, y=cov_pheno_canno, color = lfc_diff)) +
+  geom_point() + geom_abline(intercept = 0, slope = 1)
+ggplot(table_only,aes(x=cov_ctrl_iso, y=cov_ctrl_canno, color = lfc_diff)) +
+  geom_point() + geom_abline(intercept = 0, slope = 1)
+
+```
+
+## Run comps
+
+```{r comparisons_run_deseq}
+threshold = 20
+selectors_old = list(
+  'S3vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late_stage',
+    'comp title' = 'S3vsS0',
+    'threshold' = threshold ),
+  'S1vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1),
+    'phenotype_name' = 'Senescence_early_stage',
+    'comp title' = 'S1vS0',
+    'threshold' = threshold ),
+  'SXvS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1, Senescence_s2, Senescence_s3),
+    'phenotype_name' = 'Senescence',
+    'comp title' = 'SXvS0',
+    'threshold' = threshold ),
+  'S3vS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S3vsS1',
+    'threshold' = threshold ),
+  'S2S3vsS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s2, Senescence_s1),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S2S3vsS1',
+    'threshold' = threshold ),
+  'S3vS2' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s2),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S3vsS2',
+    'threshold' = threshold ),
+  'S2vS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s2),
+    'phenotype_name' = 'Senescence_mid',
+    'comp title' = 'S2vsS1',
+    'threshold' = threshold ),
+  'hypo_notx' = list(
+    'dataset_name' = 'Exposed to stress',
+    'control_list' = c(HUVEC_notx),
+    'pheno_list' = c(HUVEC_hypo),
+    'phenotype_name' = 'hypo',
+    'comp title' = 'hypo_notx',
+    'threshold' = threshold ),
+  'OxP_notx' = list(
+    'dataset_name' = 'Exposed to stress',
+    'control_list' = c(HUVEC_notx),
+    'pheno_list' = c(HUVEC_OxP),
+    'phenotype_name' = 'OxP',
+    'comp title' = 'OxP_notx',
+    'threshold' = threshold ),
+  'hypoOxp_notx' = list(
+    'dataset_name' = 'Exposed to stress',
+    'control_list' = c(HUVEC_notx),
+    'pheno_list' = c(HUVEC_hypoOxP),
+    'phenotype_name' = 'hypoOxP',
+    'comp title' = 'hypoOxp_notx',
+    'threshold' = threshold ),
+  'NvsC_all' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT, C_7, C_24),
+    'pheno_list' = c(N_NT, N_7, N_24),
+    'phenotype_name' = 'N',
+    'comp title' = 'NvsC_all',
+    'threshold' = threshold ),
+  'NvsC_NT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(N_NT),
+    'phenotype_name' = 'N_NT',
+    'comp title' = 'NvsC_NT',
+    'threshold' = threshold ),
+  'NvsC_7' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_7),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'NvsC',
+    'threshold' = threshold ),
+  'NvsC_24' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_24),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'NvsC_24',
+    'threshold' = threshold ),
+  'N_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'N_24vsNT',
+    'threshold' = threshold ),
+  'N_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'N_7vsNT',
+    'threshold' = threshold ),
+  'C_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_24),
+    'phenotype_name' = 'C_24',
+    'comp title' = 'C_24vsNT',
+    'threshold' = threshold ),
+  'C_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_7),
+    'phenotype_name' = 'C_7',
+    'comp title' = 'C_7vsNT',
+    'threshold' = threshold )
+)
+
+
+selectors = list(
+  'S3vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late_stage',
+    'comp title' = 'S3vsS0',
+    'threshold' = threshold ),
+  'S1vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1),
+    'phenotype_name' = 'Senescence_early_stage',
+    'comp title' = 'S1vS0',
+    'threshold' = threshold ),
+  'SXvS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1, Senescence_s2, Senescence_s3),
+    'phenotype_name' = 'Senescence',
+    'comp title' = 'SXvS0',
+    'threshold' = threshold ),
+  'S3vS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S3vsS1',
+    'threshold' = threshold ),
+  'S2S3vsS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s2, Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S2S3vsS1',
+    'threshold' = threshold ),
+  'S3vS2' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s2),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S3vsS2',
+    'threshold' = threshold ),
+  'S2vS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s2),
+    'phenotype_name' = 'Senescence_mid',
+    'comp title' = 'S2vsS1',
+    'threshold' = threshold ),
+  'NvsC_all' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT, C_7, C_24),
+    'pheno_list' = c(N_NT, N_7, N_24),
+    'phenotype_name' = 'N',
+    'comp title' = 'NvsC_all',
+    'threshold' = threshold ),
+  'NvsC_NT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(N_NT),
+    'phenotype_name' = 'N_NT',
+    'comp title' = 'NvsC_NT',
+    'threshold' = threshold ),
+  'NvsC_7' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_7),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'NvsC',
+    'threshold' = threshold ),
+  'NvsC_24' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_24),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'NvsC_24',
+    'threshold' = threshold ),
+  'N_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'N_24vsNT',
+    'threshold' = threshold ),
+  'N_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'N_7vsNT',
+    'threshold' = threshold ),
+  'C_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_24),
+    'phenotype_name' = 'C_24',
+    'comp title' = 'C_24vsNT',
+    'threshold' = threshold ),
+  'C_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_7),
+    'phenotype_name' = 'C_7',
+    'comp title' = 'C_7vsNT',
+    'threshold' = threshold )
+)
+
+
+threshold = 20
+selectors = list(
+  'S3vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late_stage',
+    'comp title' = 'S3vsS0',
+    'threshold' = threshold ),
+  'S1vS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1),
+    'phenotype_name' = 'Senescence_early_stage',
+    'comp title' = 'S1vS0',
+    'threshold' = threshold ),
+  'SXvS0' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s0),
+    'pheno_list' = c(Senescence_s1, Senescence_s2, Senescence_s3),
+    'phenotype_name' = 'Senescence',
+    'comp title' = 'SXvS0',
+    'threshold' = threshold ),
+  'S3vS1' = list(
+    'dataset_name' = 'Senescence dataset',
+    'control_list' = c(Senescence_s1),
+    'pheno_list' = c(Senescence_s3),
+    'phenotype_name' = 'Senescence_late',
+    'comp title' = 'S3vsS1',
+    'threshold' = threshold ),
+  'NvsC_all' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT, C_7, C_24),
+    'pheno_list' = c(N_NT, N_7, N_24),
+    'phenotype_name' = 'N',
+    'comp title' = 'NvsC_all',
+    'threshold' = threshold ),
+  'NvsC_NT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(N_NT),
+    'phenotype_name' = 'N_NT',
+    'comp title' = 'NvsC_NT',
+    'threshold' = threshold ),
+  'NvsC_7' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_7),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'NvsC_7',
+    'threshold' = threshold ),
+  'NvsC_24' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_24),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'NvsC_24',
+    'threshold' = threshold ),
+  'N_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_24),
+    'phenotype_name' = 'N_24',
+    'comp title' = 'N_24vsNT',
+    'threshold' = threshold ),
+  'N_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(N_NT),
+    'pheno_list' = c(N_7),
+    'phenotype_name' = 'N_7',
+    'comp title' = 'N_7vsNT',
+    'threshold' = threshold ),
+  'C_24vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_24),
+    'phenotype_name' = 'C_24',
+    'comp title' = 'C_24vsNT',
+    'threshold' = threshold ),
+  'C_7vsNT' = list(
+    'dataset_name' = 'Nucleus vs. cytoplasm',
+    'control_list' = c(C_NT),
+    'pheno_list' = c(C_7),
+    'phenotype_name' = 'C_7',
+    'comp title' = 'C_7vsNT',
+    'threshold' = threshold )
+)
+
+
+results_all = mclapply(selectors, function(selector) {
+  print(selector[['comp title']])
+  return(list(comp_one_run(datasets_analysis, selector), selector[['comp title']]))
+}, mc.cores = 12)
+
+process_res_all = mclapply(results_all, function(results){
+  comp_name = results[[2]]
+  print(comp_name)
+  results = results[[1]]
+  numbers = numbers_calc(results)
+  table_res = fold_table(results)
+  table_res_canno_iso = fold_table(results, 'cannonical_isomir_res')
+  #print(numbers)
+  #print(table_res[1:10,])
+  #heatmaps_res(results, comp_name, cutoff = 25, a_error = 1)
+  table_res = opposite_direction_table(table_res)
+  table_res_canno_iso = opposite_direction_table(table_res_canno_iso)
+  table_res = cov_table(table_res, datasets_analysis_normalized[[results$selector$dataset_name]], results[['selector']])
+  #logfolc_plot(table_res, paste('iso', comp_name, sep = ' '))
+  #logfolc_plot_seperate(table_res, paste('iso', comp_name, sep = ' '))
+  #logfolc_plot(table_res_canno_iso, paste('canno_iso', comp_name, sep = ' '))
+  #logfolc_plot_seperate(table_res_canno_iso, paste('canno_iso', comp_name, sep = ' '))
+  return(list(
+    'table_res_iso' = table_res,
+    'table_res_canno_iso' = table_res_canno_iso,
+    'numbers' = numbers,
+    'dataset' = results$nf_iso_data,
+    'comp_name' = comp_name
+  ))
+}, mc.cores = 12)
+```
+
+# Find interesting signal
+```{r signal of interest, results='asis'}
+##Process tables  to add valuable info
+process_res_all_2 = mclapply(process_res_all, function(res){
+  opos_tables = list()
+  for (table_type in c('table_res_iso', 'table_res_canno_iso')) {
+    opos_table = res[[table_type]]
+    opos_table['n_mismatch'] = type_isomir.species[row.names(opos_table), 'n_mismatch']
+    opos_table['n_indel'] = type_isomir.species[row.names(opos_table), 'n_indel']
+    opos_table['form_5_n'] = type_isomir.species[row.names(opos_table), 'form_5_n']
+    opos_table['form_3_n'] = type_isomir.species[row.names(opos_table), 'form_3_n']
+    opos_table['is_host'] = type_isomir.species[row.names(opos_table), 'same_seq']
+    opos_table['avg_expr'] = rowSums(res$dataset[row.names(opos_table),]) / ncol(res$dataset)
+    opos_table['iso_seq'] = type_isomir.species[row.names(opos_table), 'Sequence']
+    opos_table['host_seq'] = type_isomir.species[row.names(opos_table), 'host_seq']
+    opos_table['aligned_hsa_miRNA'] = type_isomir.species[row.names(opos_table), 'hsa_miRNA']
+    opos_table['aligned_hsa_miRNA_rev'] = type_isomir.species[row.names(opos_table), 'hsa_miRNA_rev']
+    opos_table['isomir_type'] = type_isomir.species[row.names(opos_table), "isomir_type"]
+    iso_count = c()
+    spe_sel = type_isomir.species[row.names(type_isomir.species) %in% row.names(opos_table),]
+    for (hsa in opos_table$canno_name) {
+      iso_count = c(iso_count, nrow(spe_sel[spe_sel$host_id == hsa,]))
+    }
+    opos_table['num_iso'] = iso_count
+    opos_tables[[table_type]] = opos_table
+  }
+  return(list(
+    'table_res_iso' = opos_tables$table_res_iso,
+    'table_res_canno_iso' = opos_tables$table_res_canno_iso,
+    'numbers' = res$numbers,
+    'comp_name' = res$comp_name
+  ))
+}, mc.cores = 12)
+
+############################################################################################################################################
+
+##Intersection
+N_NT_spe = na.omit(process_res_all_2$NvsC_NT$table_res_iso[process_res_all_2$NvsC_NT$table_res_iso$logfoldc_iso > 0,])
+N_7_spe = na.omit(process_res_all_2$NvsC_7$table_res_iso[process_res_all_2$NvsC_7$table_res_iso$logfoldc_iso > 0,])
+N_24_spe = na.omit(process_res_all_2$NvsC_24$table_res_iso[process_res_all_2$NvsC_24$table_res_iso$logfoldc_iso > 0,])
+N_NT_spe = N_NT_spe[N_NT_spe$fdr_iso < 0.05,]
+N_7_spe = N_7_spe[N_7_spe$fdr_iso < 0.05,]
+N_24_spe = N_24_spe[N_24_spe$fdr_iso < 0.05,]
+
+C_NT_spe = na.omit(process_res_all_2$NvsC_NT$table_res_iso[process_res_all_2$NvsC_NT$table_res_iso$logfoldc_iso < 0,])
+C_7_spe = na.omit(process_res_all_2$NvsC_7$table_res_iso[process_res_all_2$NvsC_7$table_res_iso$logfoldc_iso < 0,])
+C_24_spe = na.omit(process_res_all_2$NvsC_24$table_res_iso[process_res_all_2$NvsC_24$table_res_iso$logfoldc_iso < 0,])
+C_NT_spe = C_NT_spe[C_NT_spe$fdr_iso < 0.05,]
+C_7_spe = C_7_spe[C_7_spe$fdr_iso < 0.05,]
+C_24_spe = C_24_spe[C_24_spe$fdr_iso < 0.05,]
+
+N_spe_intersect = intersect(row.names(N_NT_spe), intersect(row.names(N_7_spe), row.names(N_24_spe)))
+C_spe_intersect = intersect(row.names(C_NT_spe), intersect(row.names(C_7_spe), row.names(C_24_spe)))
+
+
+#Nuclear specific
+Nucl_spe_iso = process_res_all_2$NvsC_NT$table_res_iso[N_spe_intersect,]
+Nucl_spe_canno_iso = process_res_all_2$NvsC_NT$table_res_canno_iso[N_spe_intersect,]
+
+#Cytoplasm specific
+Cyto_spe_iso = process_res_all_2$NvsC_NT$table_res_iso[C_spe_intersect,]
+Cyto_spe_canno_iso = process_res_all_2$NvsC_NT$table_res_canno_iso[C_spe_intersect,]
+
+#Nucleus specific show
+cat("## Shared signal accross  the hypoxia signal (nucleus and cytoplasm specific), significant isomiRs")
+cat("###  1. Nucleus specific only (shared accross all phenotypes, always in the same compartiment)")
+cat('Iso compared with pooled isomirs from the same host miRNA')
+logfolc_plot_seperate(Nucl_spe_iso, paste('iso vs canno', 'Nuclear', sep = ' '))
+cat('Iso compared with the mirbase species')
+logfolc_plot_seperate(Nucl_spe_canno_iso, paste('iso vs mirbase', 'Nuclear', sep = ' '))
+
+cat('Table Nucleus specific only (shared accross all phenotypes, always in the same compartiment)')
+#Nucl_spe_iso = Nucl_spe_iso[Nucl_spe_iso$fdr_iso < 0.05,]
+Nucl_spe_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = Nucl_spe_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+Nucl_spe_iso = Nucl_spe_iso[,c(1:6,18:20,7:17)]
+Nucl_spe_iso = Nucl_spe_iso[order(Nucl_spe_iso$class_comparison, -Nucl_spe_iso$logfoldc_iso, decreasing =  FALSE),]
+#Nucl_spe_iso
+Nucl_spe_iso[c('116778', '143590', '123509'),]
+
+#Cytoplasm specific show
+cat("###  2. Cyto specific only (shared accross all phenotypes, always in the same compartiment)")
+cat('Iso compared with pooled isomirs from the same host miRNA')
+logfolc_plot_seperate(Cyto_spe_iso, paste('iso vs canno', 'Cyto', sep = ' '))
+cat('Iso compared with the mirbase species')
+logfolc_plot_seperate(Cyto_spe_canno_iso, paste('iso vs mirbase', 'Cyto', sep = ' '))
+
+cat('Table Cyto specific only (shared accross all phenotypes, always in the same compartiment)')
+#Cyto_spe_iso = Cyto_spe_iso[Cyto_spe_iso$fdr_iso < 0.05,]
+Cyto_spe_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = Cyto_spe_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+Cyto_spe_iso = Cyto_spe_iso[,c(1:6,18:20,7:17)]
+Cyto_spe_iso = Cyto_spe_iso[order(Cyto_spe_iso$class_comparison, -Cyto_spe_iso$logfoldc_iso, decreasing =  FALSE),]
+#Cyto_spe_iso
+Cyto_spe_iso[c('182696', '182697', '131281', '5951', '109499'),]
+
+#Switching between compartment with hypoxia
+###############################################################################################################################
+
+##Select isomir species that switch
+
+N_spe_union = union(row.names(N_NT_spe), union(row.names(N_7_spe), row.names(N_24_spe)))
+C_spe_union = union(row.names(C_NT_spe), union(row.names(C_7_spe), row.names(C_24_spe)))
+
+change_of_compartment = intersect(N_spe_union, C_spe_union)
+
+#create the table for the plot
+table_NT = process_res_all_2$NvsC_NT$table_res_iso
+table_7 = process_res_all_2$NvsC_7$table_res_iso
+table_24 = process_res_all_2$NvsC_24$table_res_iso
+
+switching_df = table_NT[change_of_compartment, c(1,7:16)]
+switching_df[c('NT_fdr_iso', 'NT_logfoldc_iso', 'NT_fdr_canno', 'NT_logfoldc_canno', 'NT_class_comparison')] = table_NT[change_of_compartment, c(2:6)]
+switching_df[c('7_fdr_iso', '7_logfoldc_iso', '7_fdr_canno', '7_logfoldc_canno', '7_class_comparison')] = table_7[change_of_compartment, c(2:6)]
+switching_df[c('24_fdr_iso', '24_logfoldc_iso', '24_fdr_canno', '24_logfoldc_canno', '24_class_comparison')] = table_24[change_of_compartment, c(2:6)]
+
+table_NT = process_res_all_2$NvsC_NT$table_res_canno_iso
+table_7 = process_res_all_2$NvsC_7$table_res_canno_iso
+table_24 = process_res_all_2$NvsC_24$table_res_canno_iso
+switching_df[c('NT_fdr_canno_iso', 'NT_logfoldc_canno_iso')] = table_NT[change_of_compartment, c(4,5)]
+switching_df[c('7_fdr_canno_iso', '7_logfoldc_canno_iso')] = table_7[change_of_compartment, c(4,5)]
+switching_df[c('24_fdr_canno_iso', '24_logfoldc_canno_iso')] = table_24[change_of_compartment, c(4,5)]
+
+plot_df = switching_df[,c(1,12:32)]
+i = 1
+plots = list()
+for (iso_id in row.names(plot_df)) {
+  iso_sel = plot_df[iso_id,]
+  fold = c(iso_sel$NT_logfoldc_iso, iso_sel[['7_logfoldc_iso']], iso_sel[['24_logfoldc_iso']], iso_sel$NT_logfoldc_canno, iso_sel[['7_logfoldc_canno']], iso_sel[['24_logfoldc_canno']], iso_sel$NT_logfoldc_canno_iso, iso_sel[['7_logfoldc_canno_iso']], iso_sel[['24_logfoldc_canno_iso']])
+  hypo_cond = c('NT', '7H', '24H', 'NT', '7H', '24H', 'NT', '7H', '24H')
+  hypo_cond = factor(hypo_cond, levels = c('NT', '7H', '24H'))
+  fdr = c(iso_sel$NT_fdr_iso, iso_sel[['7_fdr_iso']], iso_sel[['24_fdr_iso']], iso_sel$NT_fdr_canno, iso_sel[['7_fdr_canno']], iso_sel[['24_fdr_canno']], iso_sel$NT_fdr_canno_iso, iso_sel[['7_fdr_canno_iso']], iso_sel[['24_fdr_canno_iso']])
+  fdr = fdr < 0.05
+  group = c('iso', 'iso', 'iso', 'canno', 'canno', 'canno', 'mirbase', 'mirbase', 'mirbase')
+  df = data.frame(fold, hypo_cond, fdr)
+  df[['fdr']] = factor(df$fdr, levels  = c(TRUE, FALSE), labels = c('p-value < 0.05', 'p-value >  0.05'))
+  #fdr_plot_df = df[df$fdr,]
+  #fdr_plot_df$fold = fdr_plot_df$fold + 0.5
+  plots[[i]] = ggplot(data=df, aes(x=hypo_cond, y=fold, group=group)) +
+  geom_line(aes(color=group)) + ggtitle(paste('isomir of ', iso_sel$canno_name, sep = '')) +
+  geom_point(aes(color=group, shape=fdr)) + labs(x='Hypoxia level', y='logfoldchange between comp', color = 'Species type', shape = 'FDR of lfc')
+  i = i + 1
+}
+
+cat('## switching isomiRs (switch compartiment with  hypoxia)')
+multiplot(plotlist = plots, cols=4)
+for (plot in plots) {
+  print(plot)
+}
+
+print('switching isomiRs (switch compartiment with  hypoxia)')
+switching_df
+
+
+
+#Hypoxia Potential inverted profile
+###############################################################################################################################################
+
+#Select ones that switch 
+N_NT_spe = na.omit(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$logfoldc_iso < 0,])
+N_24_spe = na.omit(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$logfoldc_iso > 0,])
+N_NT_spe = N_NT_spe[N_NT_spe$fdr_iso < 0.05,]
+N_24_spe = N_24_spe[N_24_spe$fdr_iso < 0.05,]
+
+C_NT_spe = na.omit(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$logfoldc_iso < 0,])
+C_24_spe = na.omit(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$logfoldc_iso > 0,])
+C_NT_spe = C_NT_spe[C_NT_spe$fdr_iso < 0.05,]
+C_24_spe = C_24_spe[C_24_spe$fdr_iso < 0.05,]
+
+##Select isomir species that switch
+switch_1 = intersect(row.names(N_NT_spe), row.names(C_24_spe))
+switch_2 = intersect(row.names(C_NT_spe), row.names(N_24_spe))
+##Select isomir species that switch
+
+change_of_compartment = union(switch_1, switch_2)
+
+#create the table for the plot
+table_N24 = process_res_all_2$N_24vsNT$table_res_iso
+table_N7 = process_res_all_2$N_7vsNT$table_res_iso
+table_C24 = process_res_all_2$C_24vsNT$table_res_iso
+table_C7 = process_res_all_2$C_7vsNT$table_res_iso
+
+switching_df = table_N24[change_of_compartment, c(1,7:16)]
+switching_df[c('N24_fdr_iso', 'N24_logfoldc_iso', 'N24_fdr_canno', 'N24_logfoldc_canno', 'N24_class_comparison')] = table_N24[change_of_compartment, c(2:6)]
+switching_df[c('N7_fdr_iso', 'N7_logfoldc_iso', 'N7_fdr_canno', 'N7_logfoldc_canno', 'N7_class_comparison')] = table_N7[change_of_compartment, c(2:6)]
+switching_df[c('C24_fdr_iso', 'C24_logfoldc_iso', 'C24_fdr_canno', 'C24_logfoldc_canno', 'C24_class_comparison')] = table_C24[change_of_compartment, c(2:6)]
+switching_df[c('C7_fdr_iso', 'C7_logfoldc_iso', 'C7_fdr_canno', 'C7_logfoldc_canno', 'C7_class_comparison')] = table_C7[change_of_compartment, c(2:6)]
+
+table_N24 = process_res_all_2$N_24vsNT$table_res_canno_iso
+table_N7 = process_res_all_2$N_7vsNT$table_res_canno_iso
+table_C24 = process_res_all_2$C_24vsNT$table_res_canno_iso
+table_C7 = process_res_all_2$C_7vsNT$table_res_canno_iso
+
+switching_df[c('N24_fdr_canno_iso', 'N24_logfoldc_canno_iso')] = table_N24[change_of_compartment, c(4,5)]
+switching_df[c('N7_fdr_canno_iso', 'N7_logfoldc_canno_iso')] = table_N7[change_of_compartment, c(4,5)]
+switching_df[c('C24_fdr_canno_iso', 'C24_logfoldc_canno_iso')] = table_C24[change_of_compartment, c(4,5)]
+switching_df[c('C7_fdr_canno_iso', 'C7_logfoldc_canno_iso')] = table_C7[change_of_compartment, c(4,5)]
+
+plot_df = switching_df
+i = 1
+plots = list()
+for (iso_id in row.names(plot_df)) {
+  iso_sel = plot_df[iso_id,]
+  #print(iso_sel)
+  fold = c(iso_sel$N24_logfoldc_iso, iso_sel[['N7_logfoldc_iso']], iso_sel[['C24_logfoldc_iso']], iso_sel[['C7_logfoldc_iso']], iso_sel$N24_logfoldc_canno, iso_sel[['N7_logfoldc_canno']], iso_sel[['C24_logfoldc_canno']], iso_sel[['C7_logfoldc_canno']], iso_sel$N24_logfoldc_canno_iso, iso_sel[['N7_logfoldc_canno_iso']], iso_sel[['C24_logfoldc_canno_iso']], iso_sel[['C7_logfoldc_canno_iso']])
+  hypo_cond = c('N', 'N', 'C', 'C', 'N', 'N', 'C', 'C', 'N', 'N', 'C', 'C')
+  hypo_cond = factor(hypo_cond, levels = c('N', 'C'))
+  fdr = c(iso_sel$N24_fdr_iso, iso_sel[['N7_fdr_iso']], iso_sel[['C24_fdr_iso']], iso_sel[['C7_fdr_iso']], iso_sel$N24_fdr_canno, iso_sel[['N7_fdr_canno']], iso_sel[['C24_fdr_canno']], iso_sel[['C7_fdr_canno']], iso_sel$N24_fdr_canno_iso, iso_sel[['N7_fdr_canno_iso']], iso_sel[['C24_fdr_canno_iso']], iso_sel[['C7_fdr_canno_iso']])
+  fdr = fdr < 0.05
+  group = c('iso-24', 'iso-7', 'iso-24', 'iso-7', 'canno-24', 'canno-7', 'canno-24', 'canno-7', 'mirbase-24', 'mirbase-7', 'mirbase-24', 'mirbase-7')
+  df = data.frame(fold, hypo_cond, fdr)
+  df[['fdr']] = factor(df$fdr, levels  = c(TRUE, FALSE), labels = c('p-value < 0.05', 'p-value >  0.05'))
+  #fdr_plot_df = df[df$fdr,]
+  #fdr_plot_df$fold = fdr_plot_df$fold + 0.5
+  plots[[i]] = ggplot(data=df, aes(x=hypo_cond, y=fold, group=group)) +
+  geom_line(aes(color=group)) + ggtitle(paste('isomir of ', iso_sel$canno_name, sep = '')) +
+  geom_point(aes(color=group, shape=fdr)) + labs(x='Compartment of comp', y='logfoldchange with hypoxia', color = 'Species & exp', shape = 'FDR of lfc')
+  i = i + 1
+}
+
+cat('## switching isomiRs (switch hypoxia-enrichment with compartment)')
+multiplot(plotlist = plots, cols=3)
+for (plot in plots) {
+  print(plot)
+}
+
+print('switching isomiRs (switch hypoxia-enrichment with compartment)')
+switching_df
+
+
+
+
+
+#Hypoxia regulaed in both compartiments
+################################################################################################################################################
+
+cat('## Hypoxia regulaed in both compartiments')
+
+#Select hypoxia up and downregulated that are found in both compartments
+
+#common_spe = intersect(union(row.names(N_NT_spe), row.names(N_24_spe)), union(row.names(C_NT_spe), row.names(C_24_spe)))
+
+common_spe = union(intersect(row.names(N_NT_spe), row.names(C_NT_spe)), intersect(row.names(N_24_spe), row.names(C_24_spe)))
+
+cyto_table_iso = process_res_all_2$C_24vsNT$table_res_iso[common_spe,]
+cyto_table_canno_iso = process_res_all_2$C_24vsNT$table_res_canno_iso[common_spe,]
+nuclear_table_iso = process_res_all_2$N_24vsNT$table_res_iso[common_spe,]
+nuclear_table_canno_iso = process_res_all_2$N_24vsNT$table_res_canno_iso[common_spe,]
+
+cat('### Logfold for common regulated isomir (numbers in nuclear compartment, compared with cannonical data)')
+logfolc_plot_seperate(nuclear_table_iso, 'Nuclear comp. Iso vs canno')
+cat('### Logfold for common regulated isomir (numbers in nuclear compartment, compared with mirbase seq data)')
+logfolc_plot_seperate(nuclear_table_canno_iso, 'Nuclear comp. Iso vs mirbase seq')
+cat('### Logfold for common regulated isomir (numbers in cyto compartment, compared with cannonical data)')
+logfolc_plot_seperate(cyto_table_iso, 'cyto comp. Iso vs canno')
+cat('### Logfold for common regulated isomir (numbers in nuclear compartment, compared with mirbase seq data)')
+logfolc_plot_seperate(cyto_table_canno_iso, 'cyto comp. Iso vs mirbase seq')
+
+cyto_table_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = cyto_table_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+cyto_table_iso = cyto_table_iso[,c(1:6,18:20,7:17)]
+
+cyto_table_iso = cyto_table_iso[order(cyto_table_iso$class_comparison, -cyto_table_iso$logfoldc_iso, decreasing =  FALSE),]
+cat('### Species regulated by  hypoxia  in both compartment (pos fold change means upregulated in hypoxia), numbers are for the cyto compartment')
+#cyto_table_iso
+cyto_table_iso[c('5011', '112965'),]
+
+nuclear_table_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = nuclear_table_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+nuclear_table_iso = nuclear_table_iso[,c(1:6,18:20,7:17)]
+
+nuclear_table_iso = nuclear_table_iso[order(nuclear_table_iso$class_comparison, -nuclear_table_iso$logfoldc_iso, decreasing =  FALSE),]
+cat('###  Species regulated by  hypoxia  in both compartment (pos fold change means upregulated in hypoxia), numbers are for the nuclear compartment')
+#nuclear_table_iso
+nuclear_table_iso[c('5011', '112965'),]
+
+#Hypoxia regulated specific of Nucleus, hypoxia regulated in nucleus, and found spe in nucleus for all hypoxia stages
+##################################################################################################################################################
+
+cat('## Hypoxia regulated specific of Nucleus, hypoxia regulated in nucleus, and found spe in nucleus for all hypoxia stages')
+
+nucleus_spe = union(row.names(N_NT_spe), row.names(N_24_spe))
+nucleus_spe = intersect(nucleus_spe, N_spe_intersect)
+
+nuclear_table_iso = process_res_all_2$N_24vsNT$table_res_iso[nucleus_spe,]
+nuclear_table_canno_iso = process_res_all_2$N_24vsNT$table_res_canno_iso[nucleus_spe,]
+
+cat('### Logfold for nuclear regulated isomir (compared with cannonical data)')
+logfolc_plot_seperate(nuclear_table_iso, 'Nuclear comp. Iso vs canno')
+cat('### Logfold for nuclear regulated isomir (compared with mirbase seq data)')
+logfolc_plot_seperate(nuclear_table_canno_iso, 'Nuclear comp. Iso vs mirbase seq')
+
+nuclear_table_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = nuclear_table_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+nuclear_table_iso = nuclear_table_iso[,c(1:6,18:20,7:17)]
+
+nuclear_table_iso = nuclear_table_iso[order(nuclear_table_iso$class_comparison, -nuclear_table_iso$logfoldc_iso, decreasing =  FALSE),]
+cat('Nuclear specific isomirs regulated in hypoxia :')
+#nuclear_table_iso
+nuclear_table_iso[c('118388'),]
+
+#Hypoxia regulated specific of Cytoplasm
+##################################################################################################################################################
+
+cat('## Hypoxia regulated specific of Cytoplasm, hypoxia regulated in Cytoplasm, and found spe in Cytoplasm for all hypoxia stages')
+
+cyto_spe = union(row.names(C_NT_spe), row.names(C_24_spe))
+cyto_spe = intersect(cyto_spe, C_spe_intersect)
+
+cyto_table_iso = process_res_all_2$C_24vsNT$table_res_iso[cyto_spe,]
+cyto_table_canno_iso = process_res_all_2$C_24vsNT$table_res_canno_iso[cyto_spe,]
+
+cat('### Logfold for cytoplasm regulated isomir (compared with cannonical data)')
+logfolc_plot_seperate(cyto_table_iso, 'cyto comp. Iso vs canno')
+cat('### Logfold for cytoplasm regulated isomir (compared with cannonical data)')
+logfolc_plot_seperate(cyto_table_canno_iso, 'cyto comp. Iso vs mirbase seq')
+
+cyto_table_iso[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = cyto_table_canno_iso[,c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+cyto_table_iso = cyto_table_iso[,c(1:6,18:20,7:17)]
+
+cyto_table_iso = cyto_table_iso[order(cyto_table_iso$class_comparison, -cyto_table_iso$logfoldc_iso, decreasing =  FALSE),]
+cat('Cytoplasm specific isomirs regulated with hypoxia :')
+cyto_table_iso
+
+## Print senescence results
+##############################################################################################
+
+process_res_all_2$S3vS0$table_res_iso[c('80217', '18909', '137627', '123266'),]
+process_res_all_2$S3vS1$table_res_iso[c('5524', '123290'),]
+process_res_all_2$S1vS0$table_res_iso[c('18909', '123266'),]
+process_res_all_2$SXvS0$table_res_iso[c('18909', '123266'),]
+
+
+
+```
+
+Covariance calc
+
+```{r}
+## Covariance plot per condition
+
+cov_distrib = function(condition) {
+  sel_iso = type_isomir.species[row.names(type_isomir.species) %in% row.names(condition_df_iso[[condition]]),]
+  sel_iso = sel_iso[sel_iso$host_id %in% unique(type_canno.species[row.names(condition_df_canno[[condition]]),'host_name']),]
+  cov_iso = c()
+  cov_canno = c()
+  mirna = c()
+  type = c()
+  mean_exp = c()
+  for (canno_sp in unique(sel_iso$host_id)) {
+    num_iso = length(row.names(sel_iso[sel_iso$host_id == canno_sp,]))
+    cov_iso = c(cov_iso, apply(as.matrix(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    }))
+    type = c(type, type_isomir.species[row.names(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),]),'isomir_type'])
+    mean_exp = c(mean_exp, log10(rowMeans(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),])) )
+    cov_canno = c(cov_canno, rep(co.var(as.numeric(as.vector(condition_df_canno[[condition]][row.names(type_canno.species[type_canno.species$host_name==canno_sp,]),]))), num_iso))
+    mirna = c(mirna, rep(canno_sp, num_iso))
+  }
+  return(data.frame(cov_iso, cov_canno, mirna, type, mean_exp))
+}
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+
+
+
+
+isomirs_S3 = c()
+table_res = process_res_all_2$S3vS0$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+#table_res = table_res[(table_res$cov_pheno_iso < 0.5) & (table_res$cov_ctrl_iso < 0.5),]
+table_res = table_res[table_res$class_comparison != 'same_signal',]
+
+table_res = process_res_all_2$S3vS0$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'canno_only_spe',]
+table_res = na.omit(table_res)
+isomirs_S3 = row.names(table_res)
+table_res = process_res_all_2$S3vS0$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'iso_only_spe',]
+table_res = na.omit(table_res)
+isomirs_S3 = c(isomirs_S3, row.names(table_res))
+table_res = process_res_all_2$S3vS0$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'opposite_dir',]
+table_res = na.omit(table_res)
+isomirs_S3 = c(isomirs_S3, row.names(table_res))
+
+isomirs_S3 = rev(isomirs_S3)
+
+#For fig main
+isomirs_S3_fig_main = c("135755", "30662", "120058", "139749", "82764", "143872", "19108", "140633", "134845", "115244", "83108", "116653", "38552", "110271", "114469", "80202", "88999")
+isomirs_S3 = isomirs_S3_fig_main
+
+
+canno_s3 = unlist(lapply(isomirs_S3,  function(x) {
+  return(row.names(type_canno.species[type_canno.species$host_name == type_isomir.species[x, 'host_id'],]))
+}))
+
+canno_sp = unlist(lapply(isomirs_S3,  function(x) {
+  return(type_isomir.species[x, 'host_id'])
+}))
+
+
+labels_cols = c(rep("S0", 3), rep("S3", 4))
+
+ntd <- normTransform(results_all$S3vS0[[1]]$isomir_res$dds)
+pheatmap(assay(ntd)[isomirs_S3, c(Senescence_s0, Senescence_s3)], color=colorRampPalette(c("#56B4E9", "white", "#D55E00"))(50), cluster_rows = FALSE, cluster_cols = FALSE,  labels_row = canno_sp, labels_col = labels_cols, scale = "row", display_numbers = round(assay(ntd)[isomirs_S3, c(Senescence_s0, Senescence_s3)], 1) , main = 'miRBase sequences')
+
+ntd <- normTransform(results_all$S3vS0[[1]]$cannonical_res$dds)
+pheatmap(assay(ntd)[canno_s3, c(Senescence_s0, Senescence_s3)], color=colorRampPalette(c("#56B4E9", "white", "#D55E00"))(50), cluster_rows = FALSE, cluster_cols = FALSE,  labels_row = canno_sp, labels_col = labels_cols, scale = "row",  display_numbers = round(assay(ntd)[canno_s3, c(Senescence_s0, Senescence_s3)], 1) ,main = 'MirDeep sequences')
+
+
+## NvC supplementary
+
+table_res = process_res_all_2$NvsC_all$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'canno_only_spe',]
+table_res = na.omit(table_res)
+isomirs_S3 = row.names(table_res)
+table_res = process_res_all_2$NvsC_all$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'iso_only_spe',]
+table_res = na.omit(table_res)
+isomirs_S3 = c(isomirs_S3, row.names(table_res))
+table_res = process_res_all_2$NvsC_all$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+table_res = table_res[table_res$class_comparison == 'opposite_dir',]
+table_res = na.omit(table_res)
+isomirs_S3 = c(isomirs_S3, row.names(table_res))
+
+canno_s3 = unlist(lapply(isomirs_S3,  function(x) {
+  return(row.names(type_canno.species[type_canno.species$host_name == type_isomir.species[x, 'host_id'],]))
+}))
+
+canno_sp = unlist(lapply(isomirs_S3,  function(x) {
+  return(type_isomir.species[x, 'host_id'])
+}))
+
+labels_cols = c(rep("C", 9), rep("N", 9))
+
+ntd <- normTransform(results_all$NvsC_all[[1]]$isomir_res$dds)
+pheatmap(assay(ntd)[isomirs_S3, ], cluster_rows = FALSE, cluster_cols = FALSE,  labels_row = canno_sp, labels_col = labels_cols, scale = "row", display_numbers = round(assay(ntd)[isomirs_S3, ], 1) , main = 'miRBase sequences')
+
+ntd <- normTransform(results_all$NvsC_all[[1]]$cannonical_res$dds)
+pheatmap(assay(ntd)[canno_s3, ], cluster_rows = FALSE, cluster_cols = FALSE,  labels_row = canno_sp, labels_col = labels_cols, scale = "row",  display_numbers = round(assay(ntd)[canno_s3, ], 1) ,main = 'MirDeep sequences')
+
+
+
+
+
+logfolc_plot(table_res, paste('miRBase seq vs conventionnal', comp_name, sep = ' '))
+logfolc_plot_seperate(table_res, paste('miRBase seq vs conventionnal', comp_name, sep = ' '))
+
+table_res = process_res_all_2$S3vS0$table_res_iso
+table_res = table_res[table_res$is_host == TRUE,]
+
+res_table = table_res
+res_table = na.omit(res_table)
+res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv')
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    table_res = process_res_all_2[[comp]]$table_res_iso
+    table_res = table_res[table_res$is_host == TRUE,]
+    
+    res_table = table_res
+    res_table = na.omit(res_table)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    plots[[i]] = ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv') + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+#print(plots)
+
+multiplot(plotlist = plots, cols = 2)
+```
+
+
+## Details ## Not used in paper
+
+```{r Details on all comparisons,  results = 'asis'}
+
+library(knitr)
+
+library(data.table)
+
+library(dplyr)
+
+library(formattable)
+
+library(tidyr)
+
+#All comparisons
+
+for (results in process_res_all_2) {
+  comp_name = results$comp_name
+  comp_name
+  #print(formattable(results$numbers))
+  print(kable(results$numbers))
+  cat("\n")
+  logfolc_plot(results$table_res_iso, paste('iso vs conv', comp_name, sep = ' '))
+  logfolc_plot_seperate(results$table_res_iso, paste('iso vs conv', comp_name, sep = ' '))
+  logfolc_plot(results$table_res_canno_iso, paste('iso vs mirbase', comp_name, sep = ' '))
+  logfolc_plot_seperate(results$table_res_canno_iso, paste('iso vs mirbase', comp_name, sep = ' '))
+  table = results$table_res_iso
+  
+  table[c('fdr_mirbase', 'logfoldc_mirbase', 'class_comparison_mirbase')] = results$table_res_canno_iso[row.names(table),c('fdr_canno', 'logfoldc_canno', 'class_comparison')]
+  table = table[,c(1:6,18:20,7:17)]
+
+  table = table[(table$fdr_iso <= 0.05),]
+  table = table[(table$avg_expr >= 150),]
+  table = table[order(table$class_comparison, -table$logfoldc_iso, decreasing =  FALSE),]
+  #print(formattable(table))
+  print(kable(table))
+  cat("\n")
+} 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+##Plots
+
+```{r}
+#process_res_all$S1vS0$table_res_iso
+
+
+table_volcano = process_res_all$S3vS0$table_res_iso
+table_volcano = na.omit(table_volcano)
+table_volcano[["type"]] = type_isomir.species[row.names(table_volcano), "isomir_type"]
+table_volcano[(table_volcano$fdr_iso > 0.05),"type"] = "Non-significant"
+table_volcano[(table_volcano$logfoldc_iso < 1) & (table_volcano$logfoldc_iso > -1),"type"] = "Non-significant"
+table_volcano[["labels"]] =  as.character(table_volcano$canno_name)
+
+colors <- c("Non-significant" = "grey", "3'isomir" = "#F564E3", "5'isomir" = "#619CFF", "5' and 3'" = "#00BFC4", "Polymorphic" = "#00BA38", "Others" = "#B79F00", "miRbase" = "#F8766D")
+
+
+ggplot(data=table_volcano, aes(x=logfoldc_iso, y=-log10(fdr_iso), col=type)) + geom_point(size = 1) + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red") + geom_text_repel(aes(label = labels, col = type), size = 3.5, max.overlaps = 10) + scale_color_manual(values = colors)
+
+
+
+colors <- c("Non-significant" = "grey", "3'isomir" = "#CC79A7", "5'isomir" = "#0072B2", "5' and 3'" = "#56B4E9", "Polymorphic" = "#009E73", "Others" = "#E69F00", "miRbase" = "#D55E00")
+
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    colors <- c("Non-significant" = "grey", "3'isomir" = "#CC79A7", "5'isomir" = "#0072B2", "5' and 3'" = "#56B4E9", "Polymorphic" = "#009E73", "Others" = "#E69F00", "miRbase" = "#D55E00")
+    table_volcano = process_res_all[[comp]]$table_res_iso
+    table_volcano = na.omit(table_volcano)
+    table_volcano[["type"]] = type_isomir.species[row.names(table_volcano), "isomir_type"]
+    table_volcano[(table_volcano$fdr_iso > 0.05),"type"] = "Non-significant"
+    table_volcano[(table_volcano$logfoldc_iso < 1) & (table_volcano$logfoldc_iso > -1),"type"] = "Non-significant"
+    table_volcano[["labels"]] =  as.character(table_volcano$canno_name)
+    plots[[i]] = ggplot(data=table_volcano, aes(x=logfoldc_iso, y=-log10(fdr_iso), col=type)) + geom_point(size = 1) + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red") + geom_text_repel(aes(label = labels, col = type), size = 3.5, max.overlaps = 10) + scale_color_manual(values = colors) + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+multiplot(plotlist = plots, cols = 2)
+
+
+
+
+```
+
+##Upset plot diff exp isomiR
+
+```{r}
+S1vS0 = row.names(process_res_all_2$S1vS0$table_res_iso[process_res_all_2$S1vS0$table_res_iso$fdr_iso < 0.05,])
+S3vS0 = row.names(process_res_all_2$S3vS0$table_res_iso[process_res_all_2$S3vS0$table_res_iso$fdr_iso < 0.05,])
+S3vS1 = row.names(process_res_all_2$S3vS1$table_res_iso[process_res_all_2$S3vS1$table_res_iso$fdr_iso < 0.05,])
+NvsC_all = row.names(process_res_all_2$NvsC_all$table_res_iso[process_res_all_2$NvsC_all$table_res_iso$fdr_iso < 0.05,])
+N_24vsNT = row.names(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$fdr_iso < 0.05,])
+C_24vsNT = row.names(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$fdr_iso < 0.05,])
+
+iso = unique(c(S3vS0, S1vS0, S3vS1, NvsC_all, N_24vsNT, C_24vsNT))
+
+S1vS0 = iso %in% S1vS0
+S3vS0 = iso %in% S3vS0
+S3vS1 = iso %in% S3vS1
+NvsC_all = iso %in% NvsC_all
+N_24vsNT = iso %in% N_24vsNT
+C_24vsNT = iso %in% C_24vsNT
+
+sets = data.frame(S3vS0, S1vS0, S3vS1, NvsC_all, N_24vsNT, C_24vsNT)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 0, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+```
+## Upset nucleus
+
+```{r}
+## TO do do, add breakdown of de genes isomiRs type ... see what we can add for senescence do the upset for both. 
+
+NvsC_all = row.names(process_res_all_2$NvsC_all$table_res_iso[process_res_all_2$NvsC_all$table_res_iso$fdr_iso < 0.05,])
+NvsC_NT = row.names(process_res_all_2$NvsC_NT$table_res_iso[process_res_all_2$NvsC_NT$table_res_iso$fdr_iso < 0.05,])
+NvsC_7 = row.names(process_res_all_2$NvsC_7$table_res_iso[process_res_all_2$NvsC_7$table_res_iso$fdr_iso < 0.05,])
+NvsC_24 = row.names(process_res_all_2$NvsC_24$table_res_iso[process_res_all_2$NvsC_24$table_res_iso$fdr_iso < 0.05,])
+N_24vsNT = row.names(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$fdr_iso < 0.05,])
+N_7vsNT = row.names(process_res_all_2$N_7vsNT$table_res_iso[process_res_all_2$N_7vsNT$table_res_iso$fdr_iso < 0.05,])
+C_24vsNT = row.names(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$fdr_iso < 0.05,])
+C_7vsNT = row.names(process_res_all_2$C_7vsNT$table_res_iso[process_res_all_2$C_7vsNT$table_res_iso$fdr_iso < 0.05,])
+
+iso = unique(c(NvsC_all, NvsC_NT, NvsC_7, NvsC_24, N_24vsNT, N_7vsNT, C_24vsNT, C_7vsNT))
+
+NvsC_all = iso %in% NvsC_all
+NvsC_NT = iso %in% NvsC_NT
+NvsC_7 = iso %in% NvsC_7
+NvsC_24 = iso %in% NvsC_24
+N_24vsNT = iso %in% N_24vsNT
+N_7vsNT = iso %in% N_7vsNT
+C_24vsNT = iso %in% C_24vsNT
+C_7vsNT = iso %in% C_7vsNT
+
+sets = data.frame(NvsC_all, NvsC_NT, NvsC_7, NvsC_24, N_24vsNT, N_7vsNT, C_24vsNT, C_7vsNT)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 0, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+
+##
+
+## TO do do, add breakdown of de genes isomiRs type ... see what we can add for senescence do the upset for both. 
+
+
+N_24vsNT = row.names(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$fdr_iso < 0.05,])
+N_7vsNT = row.names(process_res_all_2$N_7vsNT$table_res_iso[process_res_all_2$N_7vsNT$table_res_iso$fdr_iso < 0.05,])
+C_24vsNT = row.names(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$fdr_iso < 0.05,])
+C_7vsNT = row.names(process_res_all_2$C_7vsNT$table_res_iso[process_res_all_2$C_7vsNT$table_res_iso$fdr_iso < 0.05,])
+
+iso = unique(c(N_24vsNT, N_7vsNT, C_24vsNT, C_7vsNT))
+
+
+N_24vsNT = iso %in% N_24vsNT
+N_7vsNT = iso %in% N_7vsNT
+C_24vsNT = iso %in% C_24vsNT
+C_7vsNT = iso %in% C_7vsNT
+
+sets = data.frame(N_24vsNT, N_7vsNT, C_24vsNT, C_7vsNT)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 0, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+
+##
+
+
+NvsC_all = row.names(process_res_all_2$NvsC_all$table_res_iso[process_res_all_2$NvsC_all$table_res_iso$fdr_iso < 0.05,])
+NvsC_NT = row.names(process_res_all_2$NvsC_NT$table_res_iso[process_res_all_2$NvsC_NT$table_res_iso$fdr_iso < 0.05,])
+NvsC_7 = row.names(process_res_all_2$NvsC_7$table_res_iso[process_res_all_2$NvsC_7$table_res_iso$fdr_iso < 0.05,])
+NvsC_24 = row.names(process_res_all_2$NvsC_24$table_res_iso[process_res_all_2$NvsC_24$table_res_iso$fdr_iso < 0.05,])
+# = row.names(process_res_all_2$N_24vsNT$table_res_iso[process_res_all_2$N_24vsNT$table_res_iso$fdr_iso < 0.05,])
+#N_7vsNT = row.names(process_res_all_2$N_7vsNT$table_res_iso[process_res_all_2$N_7vsNT$table_res_iso$fdr_iso < 0.05,])
+#C_24vsNT = row.names(process_res_all_2$C_24vsNT$table_res_iso[process_res_all_2$C_24vsNT$table_res_iso$fdr_iso < 0.05,])
+#C_7vsNT = row.names(process_res_all_2$C_7vsNT$table_res_iso[process_res_all_2$C_7vsNT$table_res_iso$fdr_iso < 0.05,])
+
+iso = unique(c(NvsC_all, NvsC_NT, NvsC_7, NvsC_24))
+
+NvsC_all = iso %in% NvsC_all
+NvsC_NT = iso %in% NvsC_NT
+NvsC_7 = iso %in% NvsC_7
+NvsC_24 = iso %in% NvsC_24
+#N_24vsNT = iso %in% N_24vsNT
+#N_7vsNT = iso %in% N_7vsNT
+#C_24vsNT = iso %in% C_24vsNT
+#C_7vsNT = iso %in% C_7vsNT
+
+sets = data.frame(NvsC_all, NvsC_NT, NvsC_7, NvsC_24)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 0, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+
+## Upset for sensescence
+
+S3vS0 = row.names(process_res_all_2$S3vS0$table_res_iso[process_res_all_2$S3vS0$table_res_iso$fdr_iso < 0.05,])
+S1vS0 = row.names(process_res_all_2$S1vS0$table_res_iso[process_res_all_2$S1vS0$table_res_iso$fdr_iso < 0.05,])
+SXvS0 = row.names(process_res_all_2$NvsC_7$table_res_iso[process_res_all_2$SXvS0$table_res_iso$fdr_iso < 0.05,])
+S3vS1 = row.names(process_res_all_2$NvsC_24$table_res_iso[process_res_all_2$S3vS1$table_res_iso$fdr_iso < 0.05,])
+iso = unique(c(S3vS0, S1vS0, SXvS0, S3vS1))
+
+S3vS0 = iso %in% S3vS0
+S1vS0 = iso %in% S1vS0
+SXvS0 = iso %in% SXvS0
+S3vS1 = iso %in% S3vS1
+
+sets = data.frame(S3vS0, S1vS0, SXvS0, S3vS1)
+
+cols <- sapply(sets, is.logical)
+sets[,cols] <- lapply(sets[,cols], as.numeric)
+
+library(UpSetR)
+library(tidyverse)
+library(grid)
+
+upset(sets,
+  nsets = 10, number.angles = 0, point.size = 3.5, line.size = 2, order.by = "freq", text.scale = 1.5,
+  mainbar.y.label = "Number of shared isomiRs", sets.x.label = "Number of isomiRs"
+)
+
+# Compare with cannonical ?
+```
+
+
+
+##Tables
+
+```{r}
+
+#Numbers
+
+species_type = c()
+direction = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    comp = c(comp, rep(results$comp_name, 9))
+    species_type = c(species_type, rep("isomir", 3), rep("cannonical", 3), rep("refseq", 3))
+    results_type = c("isomir_up", "isomir_down", "isomir_all", "cannonical_up", "cannonical_down", "cannonical_all", "refseq_up", "refseq_down", "refseq_all")
+    direction = c(direction, rep(c("up", "down", "total"), 3))
+    number_sp = c(number_sp, results$numbers["isomir", "up"], results$numbers["isomir", "down"], results$numbers["isomir", "tot"], 
+                  results$numbers["cannonical_indep", "up"], results$numbers["cannonical_indep", "down"], results$numbers["cannonical_indep", "tot"],
+                  results$numbers["cannonical_isomir", "up"], results$numbers["cannonical_isomir", "down"], results$numbers["cannonical_isomir", "tot"])
+  }
+} 
+
+df = data.frame(comp, results_type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = results_type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single'))
+
+
+
+## Proportions
+
+species_type = c()
+direction = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    comp = c(comp, rep(results$comp_name, 3))
+    species_type = c(species_type, rep("isomir", 1), rep("cannonical", 1), rep("refseq", 1))
+    number_sp = c(number_sp, (results$numbers["isomir", "up"] + results$numbers["isomir", "down"]) / results$numbers["isomir", "tot"], 
+                  (results$numbers["cannonical_indep", "up"]+ results$numbers["cannonical_indep", "down"]) / results$numbers["cannonical_indep", "tot"],
+                  (results$numbers["cannonical_isomir", "up"]+ results$numbers["cannonical_isomir", "down"]) / results$numbers["cannonical_isomir", "tot"])
+  }
+} 
+
+
+df = data.frame(comp, species_type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = species_type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single'))
+
+## Numbers
+
+species_type = c()
+direction = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    comp = c(comp, rep(results$comp_name, 3))
+    species_type = c(species_type, rep("isomir", 1), rep("cannonical", 1), rep("refseq", 1))
+    number_sp = c(number_sp, (results$numbers["isomir", "up"] + results$numbers["isomir", "down"]), 
+                  (results$numbers["cannonical_indep", "up"]+ results$numbers["cannonical_indep", "down"]),
+                  (results$numbers["cannonical_isomir", "up"]+ results$numbers["cannonical_isomir", "down"]))
+  }
+} 
+
+
+df = data.frame(comp, species_type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = species_type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single'))
+
+
+```
+
+
+
+## Fig next
+
+```{r}
+
+##Logfold scatter plot
+logfolc_plot <- function(fold_table_res, title = '') {
+  plot = ggplot(na.omit(fold_table_res), aes(x=logfoldc_iso, y=logfoldc_canno, color = canno_name)) + geom_point(size = 2) + theme(legend.position = "none") + ggtitle(title) + ylab('logfoldc_conv')
+  multiplot(plot, cols = 1)
+}
+
+logfolc_plot_seperate <- function(fold_table_res, title = '') {
+  plots = {}
+  #print(unique(fold_table_res$class_comparison))
+  fold_table_res = na.omit(fold_table_res)
+  for (comp in unique(fold_table_res$class_comparison)) {
+    comp_name = list(
+      'iso_only_spe' = 'isomiR-exclusive significance',
+      'canno_only_spe' = 'canonical-exclusive significance',
+      'opposite_dir' = 'opposite significant singal',
+      'same_signal' = 'same signal'
+    )
+    if(nrow(fold_table_res[fold_table_res$class_comparison == comp,]) >= 1) {
+      plots[[comp]] = ggplot(na.omit(fold_table_res[fold_table_res$class_comparison == comp,]), aes(x=logfoldc_iso, y=logfoldc_canno, color = canno_name)) + geom_point() + theme(legend.position = "none") + ggtitle(comp_name[comp]) + ylab('logfoldc_conv')
+    }
+  }
+  multiplot(plotlist = plots, cols=2)
+}
+
+
+
+
+
+
+#LFC plot 2
+results = process_res_all_2$S3vS0
+res_table = results$table_res_iso
+res_table = na.omit(res_table)
+res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv')
+
+
+
+## ALL COMP
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    print(comp)
+    results = process_res_all_2[[comp]]
+    res_table = results$table_res_iso
+    res_table = na.omit(res_table)
+    if (sum((res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05)) > 0) {
+      res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05), "class_comparison"] = "same signal non sign." 
+    }
+    plots[[i]] = ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv') + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+multiplot(plotlist = plots, cols=2)
+
+
+
+## LFC plot
+results = process_res_all_2$S3vS0
+canno_sp = unique(results$table_res_iso$canno_name)
+min_lfc = c()
+max_lfc = c()
+
+for (canno in canno_sp) {
+  min_lfc = c(min_lfc, min(results$table_res_iso[(results$table_res_iso$canno_name == canno) & (results$table_res_iso$fdr_iso < 0.05),"logfoldc_iso"], na.rm = TRUE))
+  max_lfc = c(max_lfc, max(results$table_res_iso[(results$table_res_iso$canno_name == canno) & (results$table_res_iso$fdr_iso < 0.05),"logfoldc_iso"], na.rm = TRUE))
+  
+}
+
+df = data.frame(canno_sp, min_lfc, max_lfc)
+df$both = (df$min_lfc < 0) & (df$max_lfc > 0)
+diff = df$max_lfc - df$min_lfc
+df$diff = diff
+df = df[order(df$diff, decreasing = TRUE),]
+
+res_plot = na.omit(results$table_res_iso[(results$table_res_iso$canno_name %in% df[1:20, "canno_sp"]),])
+res_plot$significant = ifelse(res_plot$fdr_iso < 0.05, "fdr < 0.05", "fdr > 0.05")
+ggplot(res_plot, aes(x=logfoldc_iso, y=canno_name, color = significant)) + geom_point() + ylab('logfoldc_conv')
+
+
+## ALL COMP
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    results = process_res_all_2[[comp]]
+    canno_sp = unique(results$table_res_iso$canno_name)
+    min_lfc = c()
+    max_lfc = c()
+    for (canno in canno_sp) {
+      min_lfc = c(min_lfc, min(results$table_res_iso[(results$table_res_iso$canno_name == canno) & (results$table_res_iso$fdr_iso < 0.05),"logfoldc_iso"], na.rm = TRUE))
+      max_lfc = c(max_lfc, max(results$table_res_iso[(results$table_res_iso$canno_name == canno) & (results$table_res_iso$fdr_iso < 0.05),"logfoldc_iso"], na.rm = TRUE))
+    }
+    df = data.frame(canno_sp, min_lfc, max_lfc)
+    df$both = (df$min_lfc < 0) & (df$max_lfc > 0)
+    diff = df$max_lfc - df$min_lfc
+    df$diff = diff
+    df = df[order(df$diff, decreasing = TRUE),]
+    res_plot = na.omit(results$table_res_iso[(results$table_res_iso$canno_name %in% df[1:20, "canno_sp"]),])
+    res_plot$significant = ifelse(res_plot$fdr_iso < 0.05, "fdr < 0.05", "fdr > 0.05")
+    plots[[i]] = ggplot(res_plot, aes(x=logfoldc_iso, y=canno_name, color = significant)) + geom_point() + ylab('logfoldc_conv') + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+multiplot(plotlist = plots, cols=2)
+
+
+
+type = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    canno_spe = unique(results$table_res_iso[results$table_res_iso$fdr_canno < 0.05,"canno_name"])
+    iso_spe = unique(results$table_res_iso[results$table_res_iso$fdr_iso < 0.05,"canno_name"])
+    comp = c(comp, rep(results$comp_name, 3))
+    spe_canno = length(canno_spe) - length(intersect(canno_spe, iso_spe))
+    common = length(intersect(canno_spe, iso_spe))
+    spe_iso = length(iso_spe) - length(intersect(canno_spe, iso_spe))
+    type = c(type, "spe_canno", "common", "spe_iso")
+    number_sp = c(number_sp, spe_canno, common, spe_iso)
+  }
+} 
+
+colors <- c("spe_iso" = "#0072B2", "spe_canno" = "#D55E00",  "common" = "#CC79A7")
+
+df = data.frame(comp, type, number_sp)
+df$type = factor(df$type, levels = c("spe_iso", "spe_canno", "common"))
+
+ggplot(df, aes(x=comp, y=number_sp, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=number_sp), vjust=2, hjust = 0.5, color="black",
+            position = position_dodge(0.9), size=4) + scale_fill_manual(values = colors)
+
+
+## Diff expression summary
+
+type = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    res_table = na.omit(results$table_res_iso)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    table_comp = table(res_table$class_comparison)
+    comp = c(comp, rep(results$comp_name, length(labels(table_comp)[[1]])))
+    type = c(type, labels(table_comp)[[1]])
+    number_sp = c(number_sp, as.vector(table_comp))
+  }
+} 
+
+df = data.frame(comp, type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=number_sp), vjust=1, hjust = 0, color="black",
+            position = position_dodge(1), size=4) + coord_flip()
+
+
+```
+
+
+## Refseq figures
+
+
+```{r}
+
+## vs Refseq
+
+## Number of DE refseq: refseq analysis vs 
+type = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    canno_spe = unique(results$table_res_canno_iso[results$table_res_canno_iso$fdr_canno < 0.05,"canno_name"])
+    iso_spe = unique(results$table_res_canno_iso[(results$table_res_canno_iso$fdr_iso < 0.05),"canno_name"])
+    comp = c(comp, rep(results$comp_name, 3))
+    spe_canno = length(canno_spe) - length(intersect(canno_spe, iso_spe))
+    common = length(intersect(canno_spe, iso_spe))
+    spe_iso = length(iso_spe) - length(intersect(canno_spe, iso_spe))
+    type = c(type, "spe_canno", "common", "spe_iso")
+    number_sp = c(number_sp, spe_canno, common, spe_iso)
+  }
+} 
+
+colors <- c("spe_iso" = "#0072B2", "spe_canno" = "#D55E00",  "common" = "#CC79A7")
+df = data.frame(comp, type, number_sp)
+
+df = data.frame(comp, type, number_sp)
+df$type = factor(df$type, levels = c("spe_iso", "spe_canno", "common"))
+
+ggplot(df, aes(x=comp, y=number_sp, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=number_sp), vjust=2, hjust = 0.5, color="black",
+            position = position_dodge(0.9), size=4)  + scale_fill_manual(values = colors)
+
+
+
+#LFC plot 2
+results = process_res_all_2$S3vS0
+res_table = results$table_res_canno_iso
+res_table = na.omit(res_table)
+res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+plot = ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv')
+
+
+## LFC plots all
+
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    print(comp)
+    results = process_res_all_2[[comp]]
+    res_table = results$table_res_canno_iso
+    res_table = na.omit(res_table)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    plots[[i]] = ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv') + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+multiplot(plotlist = plots, cols=2)
+
+
+## LFC plot _ refseq_only
+
+i = 1 
+plots = list()
+
+for (comp in names(process_res_all_2)) {
+  if (comp %in% c("S1vS0", "S3vS1", "S3vS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    print(comp)
+    results = process_res_all_2[[comp]]
+    res_table = results$table_res_iso
+    res_table = res_table[res_table$is_host == TRUE,]
+    res_table = na.omit(res_table)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    plots[[i]] = ggplot(res_table, aes(x=logfoldc_iso, y=logfoldc_canno, color = class_comparison)) + geom_point(size = 0.5) + ylab('logfoldc_conv') + ggtitle(comp)
+    i = i + 1
+  }
+}
+
+multiplot(plotlist = plots, cols=2)
+
+
+
+##Results summary plot
+
+type = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    res_table = na.omit(results$table_res_canno_iso)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    table_comp = table(res_table$class_comparison)
+    comp = c(comp, rep(results$comp_name, length(labels(table_comp)[[1]])))
+    type = c(type, labels(table_comp)[[1]])
+    number_sp = c(number_sp, as.vector(table_comp))
+  }
+} 
+
+df = data.frame(comp, type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=number_sp), vjust=1, hjust = 0, color="black",
+            position = position_dodge(1), size=4) + coord_flip()
+
+
+##Ref seq only 2 --> Refseq isomiR vs stnadrad analysis 
+
+type = c()
+number_sp = c()
+comp = c()
+for (results in process_res_all_2) {
+  if (results$comp_name %in% c("S1vS0", "S3vsS1", "S3vsS0", "NvsC_all", "N_24vsNT", "C_24vsNT")) {
+    res_table = na.omit(results$table_res_iso)
+    res_table[(res_table$fdr_iso > 0.05) & (res_table$fdr_canno > 0.05),"class_comparison"] = "same signal non sign."
+    res_table = res_table[res_table$is_host == TRUE,]
+    table_comp = table(res_table$class_comparison)
+    comp = c(comp, rep(results$comp_name, length(labels(table_comp)[[1]])))
+    type = c(type, labels(table_comp)[[1]])
+    number_sp = c(number_sp, as.vector(table_comp))
+  }
+} 
+
+df = data.frame(comp, type, number_sp)
+
+ggplot(df, aes(x=comp, y=number_sp, fill = type)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=number_sp), vjust=1, hjust = 0, color="black",
+            position = position_dodge(1), size=4) + coord_flip()
+```
+
+
+## Res table isomir Type in results
+
+```{r}
+
+res_table = process_res_all_2$NvsC_all$table_res_iso
+
+res_table_nucl = res_table[(res_table$fdr_iso < 0.05) & (res_table$logfoldc_iso > 0),]
+res_table_cyto = res_table[(res_table$fdr_iso < 0.05) & (res_table$logfoldc_iso < 0),]
+
+100 * table(res_table_nucl$isomir_type)/ sum(table(res_table_nucl$isomir_type))
+100 * table(res_table_cyto$isomir_type)/ sum(table(res_table_cyto$isomir_type))
+
+Nucleus = as.vector(table(res_table_nucl$isomir_type))
+Cyto = as.vector(table(res_table_cyto$isomir_type))
+
+df = t(data.frame(Nucleus, Cyto))
+colnames(df) = labels(table(res_table_nucl$isomir_type))[1][[1]]
+
+print(chisq.test(df))
+
+
+Nucleus = as.vector(100 * table(res_table_nucl$isomir_type)/ sum(table(res_table_nucl$isomir_type)))
+Cyto = as.vector(100 * table(res_table_cyto$isomir_type)/ sum(table(res_table_cyto$isomir_type)))
+
+df_perc = t(data.frame(Nucleus, Cyto))
+colnames(df_perc) = labels(table(res_table_nucl$isomir_type))[1][[1]]
+
+percent = c()
+type = c()
+compartment = c()
+count = c()
+for (compartment_loop in rownames(df_perc)) {
+  for (type_loop in colnames(df_perc)) {
+    compartment = c(compartment, compartment_loop)
+    type = c(type, type_loop)
+    percent = c(percent, round(df_perc[compartment_loop, type_loop], 1))
+    count = c(count, df[compartment_loop, type_loop])
+  }
+}
+
+df_histo = data.frame(compartment, type, percent, count)
+
+
+ggplot(df_histo, aes(x=type, y=percent, fill = compartment)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=paste0(percent, "% - ", count)), vjust=0.5, hjust = 0, color="black",
+            position = position_dodge(1), size=4) + coord_flip()
+
+```
+
+
+## Proportion figures
+
+```{r}
+
+diff_exp = function(dataset, subset_sel = FALSE, subset) {
+  mir_list = type_isomir.species[row.names(datasets_analysis_normalized[[dataset]]$isomir),"host_id"]
+  mir_list = names(table(mir_list))[table(mir_list) > 1]
+  p_val = c()
+  iso_id = c()
+  mir_id = c()
+  stage = c()
+  if (subset_sel) {
+    test = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p", ]), row.names(datasets_analysis_normalized[[dataset]]$isomir)), subset]
+  } else {
+    test = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == "hsa-miR-191-5p",]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+  }
+  for (column in names(test)){
+        stage = c(stage, paste0(strsplit(column, "_")[[1]][1], strsplit(column, "_")[[1]][2]))
+      }
+  #stage = sample(stage)
+  for(mir in mir_list) {
+    if (subset_sel) {
+      data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir, ]), row.names(datasets_analysis_normalized[[dataset]]$isomir)), subset]
+    } else {
+      data = datasets_analysis[[dataset]]$isomir[intersect(row.names(type_isomir.species[type_isomir.species$host_id == mir,]), row.names(datasets_analysis_normalized[[dataset]]$isomir)),]
+    }
+    data = t(t(data) / colSums(data))
+    for (x in row.names(data)) {
+      test = data[x,]
+      prop = c()
+      for (column in names(test)){
+        prop = c(prop, test[column])
+      }
+      df = data.frame(prop, stage)
+      df$stage = factor(df$stage)
+      #one.way <- kruskal.test(prop ~ stage, data = df)
+      #p_val = c(p_val, one.way$p.value)
+      one.way <- aov(prop ~ stage, data = df)
+      anova_result = summary(one.way)
+      p_val = c(p_val, anova_result[[1]]$`Pr(>F)`[[1]])
+      iso_id = c(iso_id, x)
+      mir_id = c(mir_id, mir)
+    }
+  }
+  df = data.frame(iso_id, p_val, mir_id)
+  df = na.omit(df)
+  df$BH =
+        p.adjust(df$p_val,
+                 method = "BH")
+  sum(df$p_val < 0.05)
+  sum(df$p_val < 0.05 / nrow(df))
+  sum(df$BH < 0.05)
+  nrow(df)
+  df[["minlogcorrp"]] = -log(df$BH)
+  return(df)
+}
+
+df_nucl = diff_exp("Nucleus vs. cytoplasm")
+df_sene = diff_exp("Senescence dataset")
+
+minlogcorrp = c(df_nucl$minlogcorrp, df_sene$minlogcorrp)
+dataset = c(rep("compartment", nrow(df_nucl)), rep("senescence", nrow(df_sene)))
+df = data.frame(minlogcorrp, dataset)
+ggplot(data=df, aes(minlogcorrp, fill = dataset)) + 
+  geom_histogram(breaks=seq(0, 20, by = 0.4), position = "dodge") +
+  labs(title="Results of proportion differences") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))+ ylim(0, 120)
+
+
+df_sene["num_mir"] = table(df_sene$mir_id)[df_sene$mir_id]
+df_sene$mir_id = factor(df_sene$mir_id, levels = unique(df_sene[order(df_sene$num_mir, decreasing = TRUE),"mir_id"]))
+df_sene["diff"] = df_sene$BH < 0.05
+sum_mirsign = lapply(levels(df_sene$mir_id), function(mir) {sum(df_sene[df_sene$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df_sene$mir_id)
+df_sene["mir_diff"] = as.vector(sum_mirsign[df_sene$mir_id]) > 0 
+df_sene["mir_diff_num"] = unlist(sum_mirsign[df_sene$mir_id])
+df_sene["mir_diff_prop"] = df_sene$mir_diff_num / df_sene$num_mir
+ggplot(df_sene, aes(x=mir_id, y=minlogcorrp, color= mir_diff)) + geom_point() + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90))
+
+df_nucl["num_mir"] = table(df_nucl$mir_id)[df_nucl$mir_id]
+df_nucl$mir_id = factor(df_nucl$mir_id, levels = unique(df_nucl[order(df_nucl$num_mir, decreasing = TRUE),"mir_id"]))
+df_nucl["diff"] = df_nucl$BH < 0.05
+sum_mirsign = lapply(levels(df_nucl$mir_id), function(mir) {sum(df_nucl[df_nucl$mir_id == mir, "diff"])})
+names(sum_mirsign) = levels(df_nucl$mir_id)
+df_nucl["mir_diff"] = as.vector(sum_mirsign[df_nucl$mir_id]) > 0 
+df_nucl["mir_diff_num"] = unlist(sum_mirsign[df_nucl$mir_id])
+df_nucl["mir_diff_prop"] = df_nucl$mir_diff_num / df_nucl$num_mir
+
+
+ggplot(df_nucl, aes(x=mir_id, y=minlogcorrp, color= mir_diff)) + geom_point() + geom_hline(yintercept=-log(0.05)) +
+  theme(axis.text.x = element_text(angle=90))
+
+
+
+
+minlogcorrp = c(df_nucl$minlogcorrp, df_sene$minlogcorrp)
+dataset = c(rep("compartment", nrow(df_nucl)), rep("senescence", nrow(df_sene)))
+
+
+
+minlogcorrp = c(df_nucl$minlogcorrp, df_sene$minlogcorrp)
+dataset = c(rep("compartment", nrow(df_nucl)), rep("senescence", nrow(df_sene)))
+df = data_frame(minlogcorrp, dataset)
+ggplot(data=df, aes(minlogcorrp, fill = dataset)) + 
+  geom_histogram(breaks=seq(0, 20, by = 0.4), position = "dodge") +
+  labs(title="Results of proportion differences") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))+ ylim(0, 120)
+
+
+### mir level histogram
+
+mir_id = c()
+min_pval = c()
+for (mir in unique(df_nucl$mir_id)) {
+  mir_id = c(mir_id, mir)
+  min_pval = c(min_pval, max(df_nucl[df_nucl$mir_id == mir, "minlogcorrp"]))
+}
+df_nucl_mir = data.frame(mir_id, min_pval)
+mir_id = c()
+min_pval = c()
+for (mir in unique(df_sene$mir_id)) {
+  mir_id = c(mir_id, mir)
+  min_pval = c(min_pval, max(df_sene[df_sene$mir_id == mir, "minlogcorrp"]))
+}
+df_sene_mir = data.frame(mir_id, min_pval)
+
+min_pval = c(df_nucl_mir$min_pval, df_sene_mir$min_pval)
+dataset = c(rep("compartment", nrow(df_nucl_mir)), rep("senescence", nrow(df_sene_mir)))
+df = data_frame(min_pval, dataset)
+ggplot(data=df, aes(min_pval, fill = dataset)) + 
+  geom_histogram(breaks=seq(0, 20, by = 0.4), position = "dodge") +
+  labs(title="Results of proportion differences") +
+  labs(x="-log(FDR)", y="Count") + geom_vline(xintercept=-log(0.05))+ ylim(0, 15)
+
+
+## Number of isomir per mir 
+
+
+mir_id = c()
+min_pval = c()
+for (mir in unique(df_nucl$mir_id)) {
+  mir_id = c(mir_id, mir)
+  min_pval = c(min_pval, max(df_nucl[df_nucl$mir_id == mir, "mir_diff_prop"]))
+}
+df_nucl_mir = data.frame(mir_id, min_pval)
+mir_id = c()
+min_pval = c()
+for (mir in unique(df_sene$mir_id)) {
+  mir_id = c(mir_id, mir)
+  min_pval = c(min_pval, max(df_sene[df_sene$mir_id == mir, "mir_diff_prop"]))
+}
+df_sene_mir = data.frame(mir_id, min_pval)
+
+min_pval = c(df_nucl_mir$min_pval, df_sene_mir$min_pval)
+dataset = c(rep("compartment", nrow(df_nucl_mir)), rep("senescence", nrow(df_sene_mir)))
+df = data_frame(min_pval, dataset)
+ggplot(data=df, aes(min_pval, fill = dataset)) + 
+  geom_histogram(breaks=seq(0, 1, by = 0.05), position = "dodge") +
+  labs(title="Results of proportion differences") +
+  labs(x="proportion of isomiRs with changing proportions", y="Count")
+
+
+## Proportions
+
+barplot(table(type_isomir.species[df_nucl[df_nucl$BH < 0.05,'iso_id'], "isomir_type"]), main = "Number of changing isomiRs in compartment dataset")
+barplot(table(type_isomir.species[df_nucl[df_nucl$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df_nucl[,'iso_id'], "isomir_type"]), main = "Proportion of changing isomiRs in compartment dataset")
+
+barplot(table(type_isomir.species[df_sene[df_sene$BH < 0.05,'iso_id'], "isomir_type"]), main = "Number of changing isomiRs in senescence dataset")
+barplot(table(type_isomir.species[df_sene[df_sene$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df_sene[,'iso_id'], "isomir_type"]), main = "Proportion of changing isomiRs in senescence dataset")
+
+table_nucl = table(type_isomir.species[df_nucl[df_nucl$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df_nucl[,'iso_id'], "isomir_type"])
+table_sene = table(type_isomir.species[df_sene[df_sene$BH < 0.05,'iso_id'], "isomir_type"]) / table(type_isomir.species[df_sene[,'iso_id'], "isomir_type"])
+
+## 
+
+
+Compartment = as.vector(100 * table_nucl)
+Senescence = as.vector(100 * table_sene)
+
+df_perc = t(data.frame(Compartment, Senescence))
+colnames(df_perc) = labels(table_nucl)[1][[1]]
+
+
+percent = c()
+type = c()
+compartment = c()
+count = c()
+for (compartment_loop in rownames(df_perc)) {
+  for (type_loop in colnames(df_perc)) {
+    compartment = c(compartment, compartment_loop)
+    type = c(type, type_loop)
+    percent = c(percent, round(df_perc[compartment_loop, type_loop], 1))
+    count = c(count, df_perc[compartment_loop, type_loop])
+  }
+}
+
+df_histo = data.frame(compartment, type, percent, count)
+
+
+ggplot(df_histo, aes(x=type, y=percent, fill = compartment)) + 
+  geom_bar(stat = "identity", position = position_dodge(preserve = 'single')) +
+  geom_text(aes(label=paste0(percent, "%")), vjust=-0.5, hjust = 0.45, color="black",
+            position = position_dodge(1), size=4)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1930 @@
+---
+title: "stats_an1_bis.rmd"
+author: "Eloi Schmauch"
+date: "11/4/2020"
+output: html_document
+---
+
+
+## Load packages
+
+```{r load_packages}
+#library("tximport")
+library("readr")
+#library("tximportData")
+library("BiocParallel")
+library("DESeq2")
+#library(ggbiplot)
+library(M3C)
+library('ggplot2')
+library('gplots')
+library(VennDiagram)
+library("pheatmap")
+library("RColorBrewer")
+library(Biostrings)
+require("ggrepel")
+library("ggvenn")
+library(parallel)
+library(MASS)
+register(MulticoreParam(12))
+#cts <- as.matrix(read.csv('/media/eloi/SSDM2/new_raw_data/data_aim3/QNS30091/counts/counts_ens.csv',sep="\t",row.names="gene_id"))
+
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+
+## Load data
+
+```{r load_data}
+
+mirdeep = TRUE
+
+# Read standard analysis data from Prost standard analysis
+setwd("/home/eloi/Dropbox (MIT)/HEART/Analysis_aim2-3/aim2/")
+cannonical.raw <- read.csv("results_25/prost_cells_25__compressed_by_annotation.tsv", sep = '\t')
+cannonical.species <- cannonical.raw[,1:11]
+cannonical.senescence.count <- cannonical.raw[,12:26]
+cannonical.nucleus.count <- cannonical.raw[,39:56]
+
+cannonical.senescence.norm <- 1000000 * (cannonical.nucleus.count / colSums(cannonical.nucleus.count))
+cannonical.nucleus.norm <- 1000000 * (cannonical.senescence.count / colSums(cannonical.senescence.count))
+
+## List of miRNA sequences from miRbase
+cannonical_mirna = read.table("hsa_mirna.tsv", sep = '\t', header = TRUE, row.names = 1)
+cannonical_mirna_list = as.vector(cannonical_mirna$Sequence)
+
+
+
+##Read isomiR data from Prost
+isomir.raw <- read.csv("results_25/prost_cells_25__uncompressed_isomiRs.tsv", sep = '\t')
+cannonical_iso = isomir.raw[(isomir.raw$Sequence %in% cannonical_mirna_list),]
+#isomir.raw = isomir.raw[!(isomir.raw$Sequence %in% cannonical_mirna_list),]
+
+##Isomir species info object
+isomir.species <- isomir.raw[,c(1:9, 100:115)]
+type_isomir.species = isomir.species[((as.vector(isomir.species$Anno_idx) != "") | (as.vector(isomir.species$hsa_miRNA) != "")),] ##Species identified as IsomiRs by prost!
+
+isomir.senescence.count <- isomir.raw[,10:24]
+isomir.nucleus.count <- isomir.raw[,37:54]
+
+#Normalization based on all isomiRs
+isomir.senescence.norm <- 1000000 * (isomir.senescence.count / colSums(isomir.senescence.count[row.names(isomir.senescence.count) %in% row.names(type_isomir.species),]))
+isomir.nucleus.norm <- 1000000 * (isomir.nucleus.count / colSums(isomir.nucleus.count[row.names(isomir.nucleus.count) %in% row.names(type_isomir.species),]))
+#isomir.huvecs.norm <- 1000000 * (isomir.huvecs.count / colSums(isomir.huvecs.count[row.names(isomir.huvecs.count) %in% row.names(type_isomir.species),]))
+
+species_stats = list( ##The object containing the data at this level
+  "cannonical" = list(
+    "Senescence dataset" = cannonical.senescence.count,
+    "Nucleus vs. cytoplasm" = cannonical.nucleus.count
+  ),
+  "isomir" = list(
+    "Senescence dataset" = isomir.senescence.count,
+    "Nucleus vs. cytoplasm" = isomir.nucleus.count
+  ),
+  "cannonical_norm" = list(
+    "Senescence dataset" = cannonical.senescence.norm,
+    "Nucleus vs. cytoplasm" = cannonical.nucleus.norm
+  ),
+  "isomir_norm" = list(
+    "Senescence dataset" = isomir.senescence.norm,
+    "Nucleus vs. cytoplasm" = isomir.nucleus.norm
+  )
+)
+
+data_stats = list() #Object to use for the data
+for (sample_set in names(species_stats$cannonical)) {
+  data_stats[[sample_set]] = list()
+  for (species_type in names(species_stats)) {
+    data_stats[[sample_set]][[species_type]] = species_stats[[species_type]][[sample_set]]
+  }
+}
+
+##### CHOOSE IF WE USE THE PROST OF MIRDEEP CANNONICAL DATA
+
+if (mirdeep) { #Here we use miRdeep as the cannonical / standard analysis reference at its the golden standard for standard miRNA seq analysis
+  cannonical = read.csv("mirdeep_canno_signal/canno_counts.csv", sep = '\t')
+  #canno_sps = unique(cannonical$mirna_name)
+  
+  #list_canno = c()
+  #is_unique = c()
+  #i = 1
+  #exp = list()
+  #for (canno_sp in canno_sps) {
+  #  list_canno = c(list_canno, canno_sp)
+  #  is_unique = c(is_unique, nrow(cannonical[cannonical$mirna_name == canno_sp,]))
+  #  exp[[i]] = colSums(cannonical[cannonical$mirna_name == canno_sp, 2:ncol(cannonical)])
+  #  i = i + 1
+  #}
+  #cannonical = do.call(rbind, exp)
+  #cannonical = data.frame(cannonical)
+  
+  cannonical = cannonical[!duplicated(cannonical$mirna_name),]
+  
+  canno_sps = cannonical$mirna_name
+  
+  info = rep(1, length(canno_sps))
+  mirdeep_canno_species = data.frame(row.names = row.names(cannonical), canno_sps, info)
+  colnames(mirdeep_canno_species)[1] = 'host_name'
+  cannonical = cannonical[,2:ncol(cannonical)]
+  
+  cannonical = cannonical[rowSums(cannonical) > 0,]
+  mirdeep_canno_species = mirdeep_canno_species[row.names(mirdeep_canno_species) %in% row.names(cannonical),]
+  colnames_canno = unlist(lapply(colnames(cannonical), function(x){
+    return(substr(x, 1, nchar(x) - 7))
+  }))
+  colnames_canno[1:18] = unlist(lapply(colnames_canno[1:18], function(x){
+    return(substr(x, 1, nchar(x) - 7))
+  }))
+  colnames(cannonical) = colnames_canno
+  data_stats$`Senescence dataset`$cannonical = cannonical[,19:33]
+  data_stats$`Nucleus vs. cytoplasm`$cannonical = cannonical[,1:18]
+  data_stats$`Senescence dataset`$cannonical_norm = 1000000 * (cannonical[,19:33] / colSums(cannonical[,19:33]))
+  data_stats$`Nucleus vs. cytoplasm`$cannonical_norm = 1000000 * (cannonical[,1:18] / colSums(cannonical[,1:18]))
+}
+
+```
+
+
+
+
+## Stats on type of isomiR distribution
+
+```{r tyype_isomir_stats}
+# Get the confirmed isomiR sequences + their host miRNA
+
+summary(isomir.species)
+summary(cannonical_mirna)
+#get isomir species that have a known host mirna
+type_isomir.species = isomir.species[((as.vector(isomir.species$Anno_idx) != "") | (as.vector(isomir.species$hsa_miRNA) != "")),]
+type_canno.species = cannonical.species
+
+##If mirdeep, remove the multiple annotated isomirs 
+if (mirdeep) {
+  multiple_mapped_iso = type_isomir.species[(as.vector(type_isomir.species$Anno_idx) != ""),]
+  multiple_mapped_iso = multiple_mapped_iso[multiple_mapped_iso$Anno_idx %in% type_canno.species[type_canno.species$MainSeqMatchesAnnotationFile == 'Multiple', 'Anno_idx'],]
+  type_isomir.species = type_isomir.species[!(row.names(type_isomir.species) %in% row.names(multiple_mapped_iso)),]
+}
+
+#Mean expression for the multiple mapped iso
+senescence_means = rowMeans(isomir.senescence.norm[row.names(multiple_mapped_iso),])
+nucleus_means = rowMeans(isomir.nucleus.norm[row.names(multiple_mapped_iso),])
+anno_means = multiple_mapped_iso$Anno_idx
+mean_multiple = data.frame(anno_means, senescence_means, nucleus_means)
+
+
+#getting correct host name for cannonical annotations
+type_canno.species[type_canno.species$hsa_miRNA != "",'host_name'] = as.vector(type_canno.species[type_canno.species$hsa_miRNA != "",'hsa_miRNA'])
+type_canno.species[type_canno.species$hsa_miRNA == "",'host_name'] = as.vector(type_canno.species[type_canno.species$hsa_miRNA == "",'hsa_miRNA_rev'])
+type_canno.species[, 'host_name'] = unlist(lapply(type_canno.species$host_name, function(x) {strsplit(x, ',')[[1]][[1]]}))
+
+#Getting host id and sequence for each isomir
+add_host_seq <- function(isomir_spec) {
+  if (isomir_spec['Anno_idx'] != "") {
+    host_id = type_canno.species[type_canno.species$Anno_idx == isomir_spec['Anno_idx'], 'host_name']
+    host_seq = as.vector(cannonical_mirna[host_id, 'Sequence'])
+  } else {
+    host_id = strsplit(isomir_spec['hsa_miRNA'], ',')[[1]]
+    host_seq = as.vector(cannonical_mirna[host_id, 'Sequence'])
+  }
+  return(list('host_id' = host_id, 'host_seq' = host_seq))
+}
+
+host = apply(type_isomir.species, 1, add_host_seq)
+
+host_id = c()
+host_seq = c()
+
+#appending them to the df
+for (elt in host){
+  host_id = c(host_id, elt$host_id)
+  host_seq = c(host_seq, elt$host_seq)
+}
+
+type_isomir.species[, 'host_id'] = host_id
+type_isomir.species[, 'host_seq'] = host_seq
+
+
+##If mirdeep, replacing type canno species by the list of canno species from mirdeep
+if (mirdeep) {
+  type_canno.species = mirdeep_canno_species
+  #Find if the canno species is majority or not.
+}
+
+
+#testing the alignment
+sigma <- nucleotideSubstitutionMatrix(match = 2, mismatch = -1, baseOnly = TRUE)
+print(sigma)
+
+iso_seq = "AAAAGGTGGGGAGAGGGT"
+canno_seq = "AAAAGCTGGGTTGAGAGGGT"
+
+align <- pairwiseAlignment(canno_seq, iso_seq, substitutionMatrix = sigma, gapOpening = -3, type = 'global', gapExtension = -2, scoreOnly = FALSE)
+
+print(align)
+nmismatch(align)
+sum(nindel(pattern(align)))
+toString(align)
+as.matrix(align)
+
+## Find the isomiR type through alignment to the refseq 
+alignment <- function(isomir_spec) {
+  iso_seq = isomir_spec['Sequence']
+  canno_seq = isomir_spec['host_seq']
+  same_seq = (iso_seq == canno_seq)
+  align <- pairwiseAlignment(canno_seq, iso_seq, substitutionMatrix = sigma, gapOpening = -3, type = 'local', gapExtension = -1, scoreOnly = FALSE)
+  mismatch_number = nmismatch(align)
+  indel_number = nindel(pattern(align))[1] + nindel(subject(align))[1]
+  align_matrix = as.matrix(align)
+  continue = TRUE
+  nucleotide_idx = 1
+  form_5_n = 0
+  while (continue) {
+    if (align_matrix[1,nucleotide_idx] == '-') {
+      form_5_n = form_5_n + 1
+      nucleotide_idx = nucleotide_idx + 1
+    } else {
+      continue = FALSE
+    }
+  }
+  continue = TRUE
+  nucleotide_idx = ncol(align_matrix)
+  form_3_n = 0
+  while (continue) {
+    if (align_matrix[1,nucleotide_idx] == '-') {
+      form_3_n = form_3_n + 1
+      nucleotide_idx = nucleotide_idx - 1
+    } else {
+      continue = FALSE
+    }
+  }
+  #Case where the iso sequence is shorter on one hand than its host
+  host_align_seq = gsub('-', '', pattern(align))
+  if (nchar(host_align_seq) < nchar(canno_seq)) {
+    align <- pairwiseAlignment(host_align_seq, canno_seq, substitutionMatrix = sigma, gapOpening = -8, type = 'local', gapExtension = -2, scoreOnly = FALSE)
+    align_matrix = as.matrix(align)
+    if (form_5_n == 0) { # we can't have both extension and reducing of the same strand ...
+      continue = TRUE
+      nucleotide_idx = 1
+      while (continue) {
+        if (align_matrix[1,nucleotide_idx] == '-') {
+          form_5_n = form_5_n - 1 #Minus since we want to measure shortening
+          nucleotide_idx = nucleotide_idx + 1
+        } else {
+          continue = FALSE
+        }
+      }
+    }
+    if (form_3_n == 0) {
+      continue = TRUE
+      nucleotide_idx = ncol(align_matrix)
+      form_3_n = 0
+      while (continue) {
+        if (align_matrix[1,nucleotide_idx] == '-') {
+          form_3_n = form_3_n - 1
+          nucleotide_idx = nucleotide_idx - 1
+        } else {
+          continue = FALSE
+        }
+      }
+    }
+  }
+  return(list(
+    'same_seq' = same_seq,
+    'n_mismatch' = mismatch_number,
+    'n_indel' = indel_number,
+    'form_5_n' = form_5_n,
+    'form_3_n' = form_3_n
+  ))
+}
+
+
+res_alignment = apply(type_isomir.species, 1, alignment)
+
+n_mismatch = c()
+same_seq = c()
+n_indel = c()
+form_5_n = c()
+form_3_n = c()
+
+#appending them to the df
+for (elt in res_alignment){
+  same_seq = c(same_seq, elt$same_seq)
+  n_mismatch = c(n_mismatch, elt$n_mismatch)
+  n_indel = c(n_indel, elt$n_indel)
+  form_5_n = c(form_5_n, elt$form_5_n)
+  form_3_n = c(form_3_n, elt$form_3_n)
+}
+
+type_isomir.species[, 'same_seq'] = same_seq
+type_isomir.species[, 'n_mismatch'] = n_mismatch
+type_isomir.species[, 'n_indel'] = n_indel
+type_isomir.species[, 'form_5_n'] = form_5_n
+type_isomir.species[, 'form_3_n'] = form_3_n
+
+
+sel_iso_spe = type_isomir.species
+sel_iso_spe = sel_iso_spe[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]
+iso_3p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+iso_5p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+iso_poly = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) != 0)),])
+iso_3p_5p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+others = row.names(sel_iso_spe[(!(row.names(sel_iso_spe) %in% iso_3p_5p) & !(row.names(sel_iso_spe) %in% iso_3p) & !(row.names(sel_iso_spe) %in% iso_poly) & !(row.names(sel_iso_spe) %in% iso_5p)),])
+mirbase = row.names(type_isomir.species[type_isomir.species$same_seq  == TRUE,])
+#print(nrow(sel_iso_spe))
+#print(nrow(sel_iso_spe[(as.vector(sel_iso_spe$same_seq)),]))
+
+ 
+type_vector = c()
+for (iso_sp in row.names(type_isomir.species)) {
+  if (iso_sp %in% iso_3p) {
+    type_vector = c(type_vector, "3'isomir")
+  } else if (iso_sp %in% iso_5p) {
+    type_vector = c(type_vector, "5'isomir")
+  } else if (iso_sp %in% iso_poly) {
+    type_vector = c(type_vector, "Polymorphic")
+  } else if (iso_sp %in% iso_3p_5p) {
+    type_vector = c(type_vector, "5' and 3'")
+  } else if (iso_sp %in% others) {
+    type_vector = c(type_vector, "Others")
+  } else if (iso_sp %in% mirbase) {
+    type_vector = c(type_vector, "miRbase")
+  }
+}
+
+type_isomir.species[, 'isomir_type'] = type_vector
+
+```
+
+
+
+
+## Select dataset
+
+```{r}
+#Species files : type_canno.species & type_isomir.species
+datasets_analysis = data_stats
+
+
+#datasets_analysis = datasets_analysis[names(datasets_analysis) %in% "HUVECS + Senescence datasets" == FALSE]
+
+#Delete rep 1 in HUVECS
+#to_del = c('miRNA_HUVEC_hypoOxP_rep1', 'miRNA_HUVEC_hypo_rep1', 'miRNA_HUVEC_OxP_rep1', 'miRNA_HUVEC_notx_rep1')
+#datasets_analysis$`Exposed to stress`$isomir[to_del] <- list(NULL)
+#datasets_analysis$`Exposed to stress`$cannonical[to_del] <- list(NULL)
+
+setwd('/home/eloi/Dropbox (MIT)/HEART/Analysis_aim2-3/aim2/')
+# Save an object to a file
+saveRDS(datasets_analysis, file = "datasets_analysis.rds")
+saveRDS(type_canno.species, file = "type_canno.species.rds")
+saveRDS(type_isomir.species, file = "type_isomir.species.rds")
+saveRDS(multiple_mapped_iso, file = "multiple_mapped_iso.rds")
+saveRDS(mean_multiple, file = "mean_multiple.rds")
+
+
+
+normalize_and_select <- function(dataset, threshold, norm = TRUE, isomir_only = FALSE, norm_isomir = FALSE) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalise then filter
+  if (isomir_only) {
+    dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset = norm_isomir
+      dataset = dataset[row.names(dataset) %in% row.names(type_isomir.species),]
+      dataset = 1000000 * (dataset / colSums(dataset))
+    }
+    dataset = dataset[((rowSums(dataset)/ncol(dataset)) >= threshold),]
+  } else {
+    dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+    if (norm) {
+      dataset$isomir = dataset$isomir_norm
+      dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species),]
+      dataset$cannonical = dataset$cannonical_norm
+    }
+    dataset$isomir = dataset$isomir[((rowSums(dataset$isomir)/ncol(dataset$isomir)) >= threshold),]
+    #Same for the cannonical
+    dataset$cannonical = dataset$cannonical[((rowSums(dataset$cannonical)/ncol(dataset$cannonical)) >= threshold),]
+  }
+  return(dataset)
+}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+select_top <- function(dataset, top_n) {
+  dataset$isomir = dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species[type_isomir.species$same_seq == FALSE,]),]
+  sum.isomir = rowSums(dataset$isomir)
+  dataset$isomir = dataset$isomir[order(sum.isomir, decreasing=TRUE)[1:top_n], ]
+  sum.cannonical = rowSums(dataset$cannonical)
+  dataset$cannonical = dataset$cannonical[order(sum.cannonical, decreasing=TRUE)[1:top_n], ]
+  return(dataset)
+}
+
+datasets_normalized_top = lapply(datasets_analysis_normalized, function(dataset) {
+  return(select_top(dataset, 10))
+})
+
+
+##Proportion of isomiR species and counts, for figure 2
+
+counts = table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"])
+props = prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"]))
+
+counts = table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"])
+
+library(scales)
+
+df_plot = data.frame(group = names(counts), counts = as.vector(counts), props = props)
+bp<- ggplot(df_plot, aes(x="", y=counts, fill=group))+
+geom_bar(width = 1, stat = "identity")
+pie <- bp + coord_polar("y", start=0)
+pie
+
+barplot(prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"])), main = "Senescence dataset")
+
+barplot(prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir), "isomir_type"])), main = "Compartment specific dataset")
+
+
+props_sene = prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), "isomir_type"]))
+props_nucl = prop.table(table(type_isomir.species[row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir), "isomir_type"]))
+```
+
+
+## number of isomiR against level of expr in canno
+
+```{r num iso - lev expr}
+
+## Number of isomiRs against average total counts per isomiR for that miRNA. (sum of isomiRs counts)
+
+num_iso_distrib <- function(dataset_raw, threshold= 20, norm = TRUE, divide_by_num_iso = TRUE) {
+  dataset = normalize_and_select(dataset_raw, threshold, norm)
+  iso_sp = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset$isomir), ]
+  num_iso = c()
+  expr_avg = c()
+  cannonical_miR = unique(iso_sp$host_id)
+  for (canno_sp in cannonical_miR) {
+    num_iso = c(num_iso, sum(iso_sp$host_id == canno_sp))
+    sub_iso_sp = iso_sp[iso_sp$host_id == canno_sp,]
+    #print(sum(sub_iso_sp$same_seq))
+    if (sum(sub_iso_sp$same_seq) > 0) {
+      count_canno = sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(sub_iso_sp[sub_iso_sp$same_seq == TRUE,]),])
+    } else {
+      count_canno = 0
+    }
+    if (divide_by_num_iso) {
+      #expr_avg = c(expr_avg, sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(iso_sp[iso_sp$host_id == canno_sp,]),]) / ( ncol(dataset$isomir) * sum(iso_sp$host_id == canno_sp)))
+      
+      expr_avg = c(expr_avg, count_canno / ( ncol(dataset$isomir) * sum(iso_sp$host_id == canno_sp)))
+      #expr_avg = c(expr_avg, count_canno)
+    } else {
+      expr_avg = c(expr_avg, sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(iso_sp[iso_sp$host_id == canno_sp,]),]) / ( ncol(dataset$isomir)))
+      #expr_avg = c(expr_avg, count_canno)
+    }
+  }
+  distrib = data.frame(cannonical_miR, num_iso, expr_avg)
+  return(distrib)
+}
+
+thresholds = c(1, 10, 20, 100)
+
+plots = list()
+for (threshold in thresholds) {
+  for (dataset_name in names(datasets_analysis)) {
+    print(paste("Exp Threshold: ", toString(threshold), ' dataset: ', dataset_name, ')', sep = ''))
+    dis = num_iso_distrib(datasets_analysis[[dataset_name]], threshold, TRUE, FALSE)
+    #print(dis)
+    dis$labels = ifelse(((dis$num_iso * dis$expr_avg) > tail(sort(dis$num_iso * dis$expr_avg),10)[1]), as.character(dis$cannonical_miR), '')
+    plots[[paste(toString(threshold), dataset_name, sep = '-')]] = ggplot(dis, aes(x=expr_avg, y=num_iso)) + geom_point() + geom_text_repel(aes(label = labels), size = 3.5) + ggtitle(paste(dataset_name, " - ", toString(threshold), " RPM threshold", sep = '')) + ylab("Number of isomiR species") + xlab('Average expression per isomiR (RPM)') + theme(text = element_text(size = 10))   
+  }
+}
+#print(plots)
+multiplot(plotlist = plots, cols=length(thresholds))
+
+plotslog = list()
+for (threshold in thresholds) {
+  for (dataset_name in names(datasets_analysis)) {
+    print(paste("Exp Threshold: ", toString(threshold), ' dataset: ', dataset_name, ')', sep = ''))
+    dis = num_iso_distrib(datasets_analysis[[dataset_name]], threshold, TRUE, FALSE)
+    #print(dis)
+    dis$labels = ifelse(((dis$num_iso * dis$expr_avg) > tail(sort(dis$num_iso * dis$expr_avg),10)[1]), as.character(dis$cannonical_miR), '')
+    plotslog[[paste(toString(threshold), dataset_name, sep = '-')]] = ggplot(dis, aes(x=expr_avg, y=num_iso)) + geom_point() + geom_text_repel(aes(label = labels), size = 3) + ggtitle(paste(dataset_name, " - ", toString(threshold), " RPM threshold", sep = '')) + ylab("Number of isomiR species") + xlab('Average expression per isomiR (RPM)') + theme(text = element_text(size = 10)) + scale_x_continuous(trans='log2')
+  }
+}
+multiplot(plotlist = plotslog, cols=length(thresholds))
+
+dis = num_iso_distrib(datasets_analysis$`Senescence dataset`, 100, TRUE, FALSE)
+dis$labels = ifelse(((dis$num_iso * dis$expr_avg) > tail(sort(dis$num_iso * dis$expr_avg),10)[1]), as.character(dis$cannonical_miR), '')
+
+ggplot(dis, aes(x=expr_avg, y=num_iso)) + geom_point() + geom_text_repel(aes(label = labels), size = 3.5)
+ggplot(dis, aes(x=expr_avg, y=num_iso)) + geom_point() + geom_text_repel(aes(label = labels), size = 3.5) + scale_x_continuous(trans='log2') +
+  scale_y_continuous(trans='log2')
+
+plot(dis$expr_avg, dis$num_iso)
+plot(log10(dis$expr_avg), dis$num_iso)
+plot(log10(dis$expr_avg), log10(dis$num_iso))
+```
+
+## Num isomir boxplot
+
+```{r}
+
+#avg exp of each isomiR / num of isomiR, at the miRNA level, in distrubutions
+
+num_iso_distrib <- function(dataset_raw, threshold= 20, norm = TRUE, divide_by_num_iso = TRUE) {
+  dataset = normalize_and_select(dataset_raw, threshold, norm)
+  iso_sp = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset$isomir), ]
+  num_iso = c()
+  expr_avg = c()
+  cannonical_miR = unique(iso_sp$host_id)
+  for (canno_sp in cannonical_miR) {
+    num_iso = c(num_iso, sum(iso_sp$host_id == canno_sp))
+    sub_iso_sp = iso_sp[iso_sp$host_id == canno_sp,]
+    #print(sum(sub_iso_sp$same_seq))
+    if (sum(sub_iso_sp$same_seq) > 0) {
+      count_canno = sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(sub_iso_sp[sub_iso_sp$same_seq == TRUE,]),])
+    } else {
+      count_canno = 0
+    }
+    if (divide_by_num_iso) {
+      #expr_avg = c(expr_avg, sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(iso_sp[iso_sp$host_id == canno_sp,]),]) / ( ncol(dataset$isomir) * sum(iso_sp$host_id == canno_sp)))
+      expr_avg = c(expr_avg, count_canno / ( ncol(dataset$isomir) * sum(iso_sp$host_id == canno_sp)))
+    } else {
+      #expr_avg = c(expr_avg, sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(iso_sp[iso_sp$host_id == canno_sp,]),]) / ( ncol(dataset$isomir)))
+      expr_avg = c(expr_avg, count_canno / ncol(dataset$isomir))
+    }
+  }
+  distrib = data.frame(cannonical_miR, num_iso, expr_avg)
+  return(distrib)
+}
+
+
+run_ratio = function(threshold, dataset_raw) {
+  dis = num_iso_distrib(dataset_raw, threshold, TRUE, FALSE)
+  return(dis$expr_avg / dis$num_iso)
+}
+
+ratios_all = function(dataset_name, thresholds) {
+  names(thresholds) = thresholds
+  
+  
+  ratios = lapply(thresholds, function(thresh) {
+    print(thresh)
+    run_ratio(thresh, dataset_raw = datasets_analysis[[dataset_name]])
+  })
+  
+  ratio_n_iso = c()
+  threshold = c()
+  for (thresh in names(ratios)) {
+    ratio_n_iso = c(ratio_n_iso, ratios[[thresh]])
+    threshold = c(threshold, rep(thresh, length(ratios[[thresh]])))
+  }
+  threshold = factor(threshold, levels = as.character(thresholds))
+  ratios_df = data.frame(threshold, ratio_n_iso)
+  
+  return(ratios_df)
+}
+
+thresholds = c(1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+ratios = lapply(names(datasets_analysis), function(name) {
+  ratios_all(thresholds = thresholds, dataset_name = name) })
+
+
+ratios_sene = ratios[[1]]
+ratios_sene["dataset"] = rep("Senescence", rep=nrow(ratios_sene))
+
+ratios_nucl = ratios[[2]]
+ratios_nucl["dataset"] = rep("Compartment", rep=nrow(ratios_nucl))
+
+df = rbind(ratios_sene, ratios_nucl)
+
+
+##Fig 2 E
+
+p<-ggplot(df, aes(x=threshold, y=ratio_n_iso, fill=dataset)) + scale_y_continuous(trans='log2') +
+  geom_boxplot(position=position_dodge(1)) + scale_fill_manual(values=c("#8DC63F", "#262262"))
+p
+
+
+
+```
+
+
+
+
+
+
+
+
+
+## Num of isomir against threshold
+
+```{r iso_thresh_sel}
+
+##Plotting distribution of isomiRs number, for supplementary
+
+condition_df_iso = list(
+  'Senescence_s0' = datasets_analysis$`Senescence dataset`$isomir[,c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3')],
+  'Senescence_s1' = datasets_analysis$`Senescence dataset`$isomir[,c('senescence_s1_don1', 'senescence_s1_don2', 'senescence_s1_don3', 'senescence_s1_don4')],
+  'Senescence_s2' = datasets_analysis$`Senescence dataset`$isomir[,c('senescence_s2_don1', 'senescence_s2_don2', 'senescence_s2_don3', 'senescence_s2_don4')],
+  'Senescence_s3' = datasets_analysis$`Senescence dataset`$isomir[,c('senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', 'senescence_s3_don4')],
+  'N_NT' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('N_NT_1_S1', 'N_NT_2_S2', 'N_NT_3_S3')],
+  'N_7' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('N_7_1_S4', 'N_7_2_S5', 'N_7_3_S6')],
+  'N_24' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('N_24_1_S7', 'N_24_2_S8', 'N_24_3_S9')],
+  'C_NT' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('C_NT_1_S10', 'C_NT_2_S11', 'C_NT_3_S12')],
+  'C_7' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('C_7_1_S13', 'C_7_2_S14', 'C_7_3_S15')],
+  'C_24' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir[,c('C_24_1_S16', 'C_24_2_S17', 'C_24_3_S18')]
+)
+
+condition_df_iso_norm = list(
+  'Senescence_s0' = datasets_analysis$`Senescence dataset`$isomir_norm[,c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3')],
+  'Senescence_s1' = datasets_analysis$`Senescence dataset`$isomir_norm[,c('senescence_s1_don1', 'senescence_s1_don2', 'senescence_s1_don3', 'senescence_s1_don4')],
+  'Senescence_s2' = datasets_analysis$`Senescence dataset`$isomir_norm[,c('senescence_s2_don1', 'senescence_s2_don2', 'senescence_s2_don3', 'senescence_s2_don4')],
+  'Senescence_s3' = datasets_analysis$`Senescence dataset`$isomir_norm[,c('senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', 'senescence_s3_don4')],
+  'N_NT' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('N_NT_1_S1', 'N_NT_2_S2', 'N_NT_3_S3')],
+  'N_7' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('N_7_1_S4', 'N_7_2_S5', 'N_7_3_S6')],
+  'N_24' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('N_24_1_S7', 'N_24_2_S8', 'N_24_3_S9')],
+  'C_NT' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('C_NT_1_S10', 'C_NT_2_S11', 'C_NT_3_S12')],
+  'C_7' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('C_7_1_S13', 'C_7_2_S14', 'C_7_3_S15')],
+  'C_24' = datasets_analysis$`Nucleus vs. cytoplasm`$isomir_norm[,c('C_24_1_S16', 'C_24_2_S17', 'C_24_3_S18')]
+)
+
+
+iteration_one_threshold <- function(dataset, cannonical_sps, threshold, norm, isomir_only = FALSE, dataset_norm) {
+  #print(dataset)
+  #print(threshold)
+  #print(norm)
+  #print(isomir_only)
+  #print(dataset_norm)
+  dataset = normalize_and_select(dataset, threshold, norm, isomir_only, dataset_norm)
+  if(isomir_only) {
+    iso_sp = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset), ] 
+  } else {
+    iso_sp = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset$isomir), ]
+  }
+  num_iso = c()
+  for (canno_sp in cannonical_sps) {
+    num_iso = c(num_iso, sum(iso_sp$host_id == canno_sp))
+  }
+  return(num_iso)
+}
+
+iteration_one_dataset <- function(dataset, thresholds, norm, top = FALSE, canno_sps_input = FALSE, canno_sps_input_list, dataset_name, isomir_only = FALSE, dataset_norm) {
+  if (canno_sps_input) {
+    canno_sps = canno_sps_input_list
+  } else {
+    canno_sps = unique(type_isomir.species$host_id)
+    if (top) {
+      expr = c()
+      for (canno_sp in canno_sps) {
+        if(isomir_only) {
+          expr[canno_sp] = sum(dataset[row.names(dataset) %in% row.names(type_isomir.species[type_isomir.species$host_id == canno_sp,]), ])
+        } else {
+          expr[canno_sp] = sum(dataset$isomir[row.names(dataset$isomir) %in% row.names(type_isomir.species[type_isomir.species$host_id == canno_sp,]), ])
+        }
+      }
+      canno_sps = names(expr)[order(expr, decreasing=TRUE)[1:top]]
+    }
+  }
+  num_iso = mclapply(thresholds, function(thresh) {
+    if (thresh %% 20 == 0) {print(thresh)}
+    return(iteration_one_threshold(dataset, canno_sps, thresh, norm, isomir_only, dataset_norm))
+  }, mc.cores = 12)
+  iso_count = c()
+  thresholds_list = c()
+  canno_sps_list = c()
+  dataset_name_list = c()
+  #print(names(num_iso))
+  for (num_name in 1:length(num_iso)) {
+    iso_count = c(iso_count, num_iso[[num_name]])
+    canno_sps_list = c(canno_sps_list, canno_sps)
+    thresholds_list = c(thresholds_list, rep(num_name, length(num_iso[[num_name]])))
+    dataset_name_list =c(dataset_name_list, rep(dataset_name, length(num_iso[[num_name]])))
+  }
+  num_iso = data.frame(canno_sps_list, thresholds_list, iso_count, dataset_name_list)
+  return(num_iso)
+}
+
+
+
+thresholds = c(1:125)
+## Plot for 3 datasets
+plots = lapply(names(datasets_analysis), function(dataset_name) {
+  res = iteration_one_dataset(datasets_analysis[[dataset_name]], thresholds, TRUE, 100, FALSE, top_10_canno_id, dataset_name = dataset_name)
+  plot = ggplot(data=res, aes(x=thresholds_list, y=iso_count, group=canno_sps_list)) +  geom_line() + ylim(0, 300) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Number of detected IsomiRs') + ggtitle(dataset_name)
+  return(plot)
+}) 
+
+multiplot(plotlist = plots, cols=2)
+
+
+## Top 10 canno as input
+
+canno_all = cannonical
+top_10_all_canno = order(rowSums(canno_all), decreasing = TRUE)[1:10] 
+
+top_10_canno_id = type_canno.species[top_10_all_canno, 'host_name']
+
+
+thresholds = c(1:125)
+
+
+## Plot for 3 datasets
+plots = lapply(names(datasets_analysis), function(dataset_name) {
+  res = iteration_one_dataset(datasets_analysis[[dataset_name]], thresholds, TRUE, FALSE, TRUE, as.character(top_10_canno_id), dataset_name)
+  plot = ggplot(data=res, aes(x=thresholds_list, y=iso_count, group=canno_sps_list)) +  geom_line(aes(color=canno_sps_list)) + ylim(0, 300) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Number of detected IsomiRs') + ggtitle(dataset_name)
+  return(plot)
+}) 
+
+multiplot(plotlist = plots, cols=2)
+
+
+
+ ##Function top 10
+top_10_per_condition = function(condition_df, isomir_only = TRUE, condition_df_norm = FALSE) {
+  res_distrib = lapply(names(condition_df), function(dataset_name) {
+    res = iteration_one_dataset(condition_df[[dataset_name]], thresholds, TRUE, FALSE, TRUE, as.character(top_10_canno_id), dataset_name, isomir_only = isomir_only, dataset_norm = condition_df_norm[[dataset_name]])
+    return(res)
+  }) 
+  res = rbind(res_distrib[[1]], res_distrib[[2]])
+  ### TO ADAPT TO NUM OF DATASETS
+  if (length(res_distrib) > 2) {
+    for (i in 3:length(res_distrib)) {
+      res = rbind(res, res_distrib[[i]])
+    }
+  }
+  plots = list()
+  for (canno_sp in unique(res$canno_sps_list)[1:9]) {
+    canno_res = res[res$canno_sps_list == canno_sp,]
+    plots[[canno_sp]] = ggplot(data=canno_res, aes(x=thresholds_list, y=iso_count, group=dataset_name_list)) +  geom_line(aes(color=dataset_name_list)) + ylim(0, 300) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Number of detected IsomiRs') + ggtitle(canno_sp)
+  }
+  return(plots)
+}
+
+##Top ten datasets
+plots_datasets = top_10_per_condition(datasets_analysis, isomir_only = FALSE)
+multiplot(plotlist = plots_datasets, cols=3)
+
+##Top ten all
+plots_all = top_10_per_condition(condition_df_iso, TRUE, condition_df_iso_norm)
+multiplot(plotlist = plots_all, cols=3)
+
+
+##Top ten for senescence
+condition_df = condition_df_iso[c("Senescence_s0", "Senescence_s1", "Senescence_s2", "Senescence_s3")]
+condition_df_norm = condition_df_iso_norm[c("Senescence_s0", "Senescence_s1", "Senescence_s2", "Senescence_s3")]
+plots_sene = top_10_per_condition(condition_df, TRUE, condition_df_norm)
+multiplot(plotlist = plots_sene, cols=3)
+
+##Top ten for Nuclear
+condition_df = condition_df_iso[c("N_NT", "N_7", "N_24", "C_NT", "C_7", "C_24")]
+condition_df_norm = condition_df_iso_norm[c("N_NT", "N_7", "N_24", "C_NT", "C_7", "C_24")]
+plots_nuc = top_10_per_condition(condition_df, TRUE, condition_df_norm)
+multiplot(plotlist = plots_nuc, cols=3)
+
+```
+
+
+
+
+## Proportion of isomir for each cannonical species
+
+```{r proportion_of_isomir_expression}
+
+isomir_perc = function(cannon_sp, iso_data, iso_species) {
+  #print(cannon_sp)
+  cannon_names = row.names(iso_species[(iso_species$host_id == cannon_sp) & (iso_species$same_seq == TRUE), ])
+  cannon_quant = ifelse(sum(row.names(iso_data) %in% cannon_names) > 0, sum(iso_data[row.names(iso_data) %in% cannon_names , ]), 0)
+  iso_names = row.names(iso_species[(iso_species$host_id == cannon_sp) & (iso_species$same_seq == FALSE), ])
+  iso_quant = ifelse(sum(row.names(iso_data) %in% iso_names) > 0, sum(iso_data[row.names(iso_data) %in% iso_names , ]), 0)
+  return(signif(iso_quant/(cannon_quant + iso_quant) * 100, 3))
+}
+
+#isomir_perc("a695", isomir.nucleus.count, cannonical_iso[16:35], isomir.species)
+
+#isomir_perc(as.vector(cannonical.species$Anno_idx), isomir.nucleus.count, cannonical_iso[16:35], isomir.species)
+
+
+#lapply(as.vector(cannonical.species$Anno_idx), isomir_perc, iso_data = isomir.nucleus.count, cannon_data = cannonical_iso[16:35], iso_species = isomir.species)
+
+
+
+
+all_isomir_perc = function(dataset) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = type_isomir.species[row.names(filtered_isomir_data),]
+  annot_canon = unique(as.list(as.vector(sel_iso_spe$host_id)))
+  names(annot_canon) = unique(as.list(as.vector(sel_iso_spe$host_id)))
+  res = lapply(annot_canon, isomir_perc, iso_data = filtered_isomir_data, iso_species = sel_iso_spe)
+  return(res[!is.na(res)])
+}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+res_isomir_perc = lapply(datasets_analysis_normalized, all_isomir_perc)
+
+par(mfrow=c(2,1))
+lapply(names(res_isomir_perc), function(dataset) {
+  hist(unlist(res_isomir_perc[[dataset]]), breaks = 10, main = dataset, xlab = "Percentage of non miRbase miRNA expression", ylab = "Number of miRbase sequences")
+})
+
+values = c()
+names_sp = c()
+dataset_ori = c()
+for (dataset in names(res_isomir_perc)) {
+  values = c(values, unlist(res_isomir_perc[[dataset]]))
+  names_sp = c(names_sp, names(res_isomir_perc[[dataset]]))
+  dataset_ori = c(dataset_ori, rep(dataset, length(res_isomir_perc[[dataset]])))
+}
+res_isomir_perc_df = data.frame(dataset_ori, names_sp, values)
+
+par(mfrow=c(1,1))
+ggplot(res_isomir_perc_df, aes(x=dataset_ori, y=values)) + 
+  geom_violin(trim=TRUE) + ggtitle("Distribution of isomiR expression among cannonical miRNA species") + ylab("Percentage of miRNA expression coming from non-cannonical isomiRs") + xlab("Dataset")
+
+
+##Fig 2 F
+
+ggplot(data=res_isomir_perc_df, aes(values, fill = dataset_ori)) + 
+  geom_histogram(breaks=seq(0, 100, by = 5), position = "dodge") +
+  labs(title="Results of proportion differences") +
+  labs(x="percentage of expression from non Refseq", y="Number of miRna") + scale_fill_manual(values=c("#8DC63F", "#262262"))
+
+
+
+
+```
+
+
+## Number of species
+
+```{r species_n}
+datasets_analysis = data_stats
+
+normalize_and_select_with_candidates <- function(dataset, threshold, norm = TRUE, isomir_only = FALSE, norm_isomir = FALSE) {
+  #Threshold will be modified to have bio significance
+  #For the isomir, sel the confirmed, normalise then filter
+  dataset_copy = dataset
+  if (isomir_only) {
+    if (norm) {
+      dataset_copy = norm_isomir
+      dataset_copy = dataset_copy[row.names(dataset_copy) %in% row.names(type_isomir.species),]
+      dataset_copy = 1000000 * (dataset_copy / colSums(dataset_copy))
+    }
+    dataset_copy = dataset_copy[((rowSums(dataset_copy)/ncol(dataset_copy)) >= threshold),]
+  } else {
+    if (norm) {
+      dataset_copy$isomir = dataset_copy$isomir_norm
+      dataset_copy$cannonical = dataset_copy$cannonical_norm
+    }
+    dataset_copy$isomir = dataset_copy$isomir[((rowSums(dataset_copy$isomir)/ncol(dataset_copy$isomir)) >= threshold),]
+    #Same for the cannonical
+    dataset_copy$cannonical = dataset_copy$cannonical[((rowSums(dataset_copy$cannonical)/ncol(dataset_copy$cannonical)) >= threshold),]
+  }
+  return(dataset_copy)
+}
+
+
+
+
+count_species_stats <- function(dataset, dataset_name) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = isomir.species[rownames(filtered_isomir_data),]
+  filtered_canno_data = dataset$cannonical
+  sel_canno_spe = type_canno.species[rownames(filtered_canno_data),]
+  dataset_iso = normalize_and_select_with_candidates(datasets_analysis[[dataset_name]], 1, norm = TRUE)
+  perc = unlist(all_isomir_perc(dataset_iso))
+  perc_v = c()
+  #print(sel_canno_spe)
+  for (canno_sp in as.vector(sel_canno_spe$host_name)) {
+    #print(canno_sp)
+    if (canno_sp %in% names(perc)) {
+      perc_v = c(perc_v, perc[[canno_sp]])
+    } else {
+      perc_v = c(perc_v, 0)
+    }
+  }
+  #print(perc_v)
+  res = list(
+    "All miRNA (candidate + confirmed)" = nrow(sel_iso_spe[((as.vector(sel_iso_spe$Anno_idx) == "") & (as.vector(sel_iso_spe$hsa_miRNA) == "") & (as.vector(sel_iso_spe$other_ncRNA) == "")) | ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]),
+    "Candidate miRNAs" = nrow(sel_iso_spe[((as.vector(sel_iso_spe$Anno_idx) == "") & (as.vector(sel_iso_spe$hsa_miRNA) == "") & (as.vector(sel_iso_spe$other_ncRNA) == "")),]),
+    "Confirmed miRNAs" = nrow(sel_iso_spe[((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]),
+    "Confirmed Isomir without miRbase sequences" = nrow(sel_iso_spe[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]),
+    #"All cannonical miRNA" = nrow(sel_iso_spe), old version 
+    "All miRbase sequences" = nrow(sel_canno_spe),
+    "Majority species miRbase sequences" = sum(perc_v < 50)
+  )
+  category = c("All miRNA (candidate + confirmed)", "Candidate miRNAs", "Confirmed miRNAs", "Confirmed Isomir without miRbase sequences", "All miRbase sequences", "Majority species miRbase sequences")
+  category = factor(category, levels = rev(c("All miRNA (candidate + confirmed)", "Candidate miRNAs", "Confirmed miRNAs", "Confirmed Isomir without miRbase sequences", "All miRbase sequences", "Majority species miRbase sequences")))
+  count = unlist(res)
+  df = data.frame(category, count)
+  return(df)
+}
+
+threshold = 20
+
+datasets_analysis_filtered = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select_with_candidates(dataset, threshold, norm = TRUE)) 
+})
+
+dataset_names = names(datasets_analysis_filtered)
+names(dataset_names) = names(datasets_analysis_filtered)
+count_species_res <- mclapply(dataset_names, function(dataset_name) {
+  return(count_species_stats(datasets_analysis_filtered[[dataset_name]], dataset_name)) 
+}, mc.cores = 12)
+
+
+  
+#main = stat_type, sub = samples_set,
+
+
+
+par(mfrow=c(1,1))
+  ggplot(count_species_res$`Senescence dataset`, aes(category, count)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.7, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+  geom_text(aes(label=count), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3.5) + ylab("Number of species") + xlab("Type of RNA") +
+  scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle('Senescence') +
+  theme_minimal()
+
+plots = lapply(names(count_species_res), function(dataset) {
+  return(ggplot(count_species_res[[dataset]], aes(category, count)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.7, color = 'black') + scale_fill_brewer(palette = "Set2") + coord_flip()+scale_y_log10(n.breaks = 7) +
+  geom_text(aes(label=count), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3.5) + ylab("Number of species") + xlab("Type of RNA") +
+  scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle(dataset) +
+  theme_minimal())
+})
+
+#scale_y_log10(n.breaks = 7)
+
+
+##Supplementary, RNA species counts
+
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+
+```
+
+
+
+
+## Count distribution
+
+```{r Count_distrib}
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select_with_candidates(dataset, 20, norm = TRUE)) 
+})
+
+
+
+count_7_groups <- function(count_list) {
+  return(list(
+    #"<1" = sum(count_list < 1),
+    #"1 - 10" = sum((count_list >= 1) & (count_list < 10)),
+    "10 - 100" = sum((count_list >= 10) & (count_list < 100)),
+    "100 - 1k" = sum((count_list >= 100) & (count_list < 1000)),
+    "1k - 10k" = sum((count_list >= 1000) & (count_list < 10000)),
+    "10k - 100k" = sum((count_list >= 10000) & (count_list < 100000))
+    #">100k" = sum(count_list > 100000)
+  ))
+}
+
+
+count_reads_all <- function(dataset) {
+  filtered_isomir_data = dataset$isomir
+  #Normalisation in RPM:
+  sel_iso_spe = isomir.species[rownames(filtered_isomir_data),]
+  res = list(
+    #"All species" = unlist(count_7_groups(rowMeans(filtered_isomir_data))),
+    "All miRNA (candidate + confirmed)" = unlist(count_7_groups(rowMeans(filtered_isomir_data[((as.vector(sel_iso_spe$Anno_idx) == "") & (as.vector(sel_iso_spe$hsa_miRNA) == "") & (as.vector(sel_iso_spe$other_ncRNA) == "")) | ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]))),
+    #"Candidate miRNAs" = unlist(count_7_groups(rowMeans(filtered_isomir_data[((as.vector(sel_iso_spe$Anno_idx) == "") & (as.vector(sel_iso_spe$hsa_miRNA) == "") & (as.vector(sel_iso_spe$other_ncRNA) == "")),]))),
+    "Confirmed miRNA" = unlist(count_7_groups(rowMeans(filtered_isomir_data[((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]))),
+    "Isoform without canonical" = unlist(count_7_groups(rowMeans(filtered_isomir_data[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),])
+  )))
+  values = c()
+  category = c()
+  type_ori = c()
+  percentages_list = list()
+  percentages = c()
+  for (group_count in names(res[["Confirmed miRNA"]])) {
+    sum_species = 0
+    percentages_list[[group_count]] = list()
+    for (type_spe in names(res)) {
+      sum_species = sum_species + res[[type_spe]][[group_count]]
+    }
+    for (type_spe in names(res)) {
+      percentages_list[[group_count]][[type_spe]] = format(round((res[[type_spe]][[group_count]] / sum_species), 2), nsmall = 2)
+    }
+  }
+  for (type_spe in names(res)) {
+    values = c(values, unlist(res[[type_spe]]))
+    category = c(category, names(res[[type_spe]]))
+    type_ori = c(type_ori, rep(type_spe, length(res[[type_spe]])))
+    for (group_count in names(res[["Confirmed miRNA"]])) {
+      percentages = c(percentages, percentages_list[[group_count]][[type_spe]])
+    }
+  }
+  
+  df = data.frame(type_ori, category, values, percentages)
+  df$category <- factor(df$category, levels = rev(c("10 - 100", "100 - 1k", "1k - 10k", "10k - 100k")))
+  df$type_ori <- factor(df$type_ori, levels = rev(c("All miRNA (candidate + confirmed)", "Candidate miRNAs", "Confirmed miRNA", "Isoform without canonical")))
+  return(df)
+}
+
+res_count_reads_all = lapply(datasets_analysis_normalized, count_reads_all)
+
+
+plots = lapply(names(res_count_reads_all), function(dataset) {
+  return(ggplot(res_count_reads_all[[dataset]], aes(category, values, fill = type_ori)) + 
+    geom_bar(stat="identity", position = "dodge", width=0.9, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+    geom_text(aes(label=paste(percentages, '% - ', values, sep = '')), vjust=0.5, hjust = 1.1, color="white", position = position_dodge(0.9), size=3) + 
+    #geom_text(aes(label=percentages), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3) +
+    ylab("Number of species") + xlab("Normalized count (RPM)") + scale_fill_discrete(guide=FALSE) + ggtitle(dataset) +
+    theme_minimal())
+})
+
+#plots
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+
+par(mfrow=c(1,1))
+  ggplot(res_count_reads_all$`Senescence dataset`, aes(category, values, fill = type_ori)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.9, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+  geom_text(aes(label=values), vjust=0.5, hjust = 1.2, color="white",
+            position = position_dodge(0.9), size=3) + ylab("Number of species") + xlab("Normalized count (RPM)") + scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle('Senescence') +  theme_minimal()
+
+  theme_minimal()
+
+```
+
+
+## Count distribution per type
+
+```{r Count_distrib_type}
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+
+
+count_7_groups <- function(count_list) {
+  return(list(
+    #"<1" = sum(count_list < 1),
+    #"1 - 10" = sum((count_list >= 1) & (count_list < 10)),
+    "10 - 100" = sum((count_list >= 10) & (count_list < 100)),
+    "100 - 1k" = sum((count_list >= 100) & (count_list < 1000)),
+    "1k - 10k" = sum((count_list >= 1000) & (count_list < 10000)),
+    "10k - 100k" = sum((count_list >= 10000) & (count_list < 100000))
+    #">100k" = sum(count_list > 100000)
+  ))
+}
+
+
+count_reads_all <- function(dataset) {
+  filtered_isomir_data = dataset$isomir
+  #Normalisation in RPM:
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]),]
+  res = list(
+    
+    #"All species" = unlist(count_7_groups(rowMeans(filtered_isomir_data))),
+    "3' isomiRs" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "3'isomir"),]))),
+    "5' isomiRs" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "5'isomir"),]))),
+    "5' and 3'" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "5' and 3'"),]))),
+    "Polymorphic" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "Polymorphic"),]))),
+    "Others" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "Others"),]))),
+    "Refseq" = unlist(count_7_groups(rowMeans(filtered_isomir_data[as.vector(sel_iso_spe$isomir_type == "miRbase"),])))
+    )
+  values = c()
+  category = c()
+  type_ori = c()
+  percentages_list = list()
+  percentages = c()
+  for (group_count in names(res[["3' isomiRs"]])) {
+    sum_species = 0
+    percentages_list[[group_count]] = list()
+    for (type_spe in names(res)) {
+      sum_species = sum_species + res[[type_spe]][[group_count]]
+    }
+    for (type_spe in names(res)) {
+      percentages_list[[group_count]][[type_spe]] = format(round((res[[type_spe]][[group_count]] / sum_species), 2), nsmall = 2)
+    }
+  }
+  for (type_spe in names(res)) {
+    values = c(values, unlist(res[[type_spe]]))
+    category = c(category, names(res[[type_spe]]))
+    type_ori = c(type_ori, rep(type_spe, length(res[[type_spe]])))
+    for (group_count in names(res[["3' isomiRs"]])) {
+      percentages = c(percentages, percentages_list[[group_count]][[type_spe]])
+    }
+  }
+  
+  df = data.frame(type_ori, category, values, percentages)
+  df$category <- factor(df$category, levels = rev(c("10 - 100", "100 - 1k", "1k - 10k", "10k - 100k")))
+  df$type_ori <- factor(df$type_ori, levels = rev(c("3' isomiRs", "5' isomiRs", "5' and 3'", "Polymorphic", "Others", "Refseq")))
+  return(df)
+}
+
+res_count_reads_all = lapply(datasets_analysis_normalized, count_reads_all)
+
+
+plots = lapply(names(res_count_reads_all), function(dataset) {
+  return(ggplot(res_count_reads_all[[dataset]], aes(category, values, fill = type_ori)) + 
+    geom_bar(stat="identity", position = "dodge", width=0.9, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+    geom_text(aes(label=paste(percentages, '% - ', values, sep = '')), vjust=0.5, hjust = 1.1, color="white", position = position_dodge(0.9), size=3) + 
+    #geom_text(aes(label=percentages), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3) +
+    ylab("Number of species") + xlab("Normalized count (RPM)") + scale_fill_discrete(guide=FALSE) + ggtitle(dataset) +
+    theme_minimal())
+})
+
+#plots
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+
+par(mfrow=c(1,1))
+  ggplot(res_count_reads_all$`Senescence dataset`, aes(category, values, fill = type_ori)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.9, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+  geom_text(aes(label=values), vjust=0.5, hjust = 1.2, color="white",
+            position = position_dodge(0.9), size=3) + ylab("Number of species") + xlab("Normalized count (RPM)") + scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle('Senescence') +  theme_minimal()
+
+```
+
+
+## Figs on isomir type distribution
+
+```{r isomir_type_distrib}
+library(VennDiagram)
+
+sepecies_form_stats <- function(dataset) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]
+  sel_iso_spe = sel_iso_spe[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]
+  iso_3p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  iso_5p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  iso_poly = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) != 0)),])
+  iso_3p_5p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  others = nrow(sel_iso_spe) - iso_3p_5p - iso_3p - iso_5p - iso_poly
+  print(nrow(sel_iso_spe))
+  print(nrow(sel_iso_spe[(as.vector(sel_iso_spe$same_seq)),]))
+  res = list(
+    "3' isomir" = iso_3p,
+    "5' isomir" = iso_5p,
+    "Polymorphic" = iso_poly,
+    "5' and 3'" = iso_3p_5p,
+    "Others" = others
+  )
+  category = names(res)
+  count = unlist(res)
+  df = data.frame(category, count)
+  return(df)
+}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 20, norm = TRUE)) 
+})
+
+
+species_form_res <- lapply(datasets_analysis_normalized, sepecies_form_stats)
+
+plots = lapply(names(species_form_res), function(dataset) {
+  return(ggplot(species_form_res[[dataset]], aes(category, count)) + 
+    geom_bar(stat="identity", position = "dodge", width=0.7, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+    geom_text(aes(label=count), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3.5) + ylab("Number of species") + xlab("Type of RNA") +
+    scale_fill_discrete(name = "Type of RNA") +
+    guides(fill = guide_legend(reverse = TRUE)) + ggtitle(dataset) +
+    theme_minimal())
+})
+
+plots
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+
+
+test = sepecies_form_stats(data_stats$`Senescence dataset`)
+
+par(mfrow=c(1,1))
+  ggplot(test, aes(category, count)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.7, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+  geom_text(aes(label=count), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3.5) + ylab("Number of species") + xlab("Type of RNA") +
+  scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle('Senescence') +
+  theme_minimal()
+
+## Venn diagram
+
+sepecies_form_stats_for_venn <- function(dataset) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]
+  sel_iso_spe = sel_iso_spe[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]
+  iso_3p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  iso_5p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  iso_poly = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) != 0)),])
+  iso_3p_5p = row.names(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+  others = row.names(sel_iso_spe[(!(row.names(sel_iso_spe) %in% iso_3p_5p) & !(row.names(sel_iso_spe) %in% iso_3p) & !(row.names(sel_iso_spe) %in% iso_poly) & !(row.names(sel_iso_spe) %in% iso_5p)),])
+  #print(nrow(sel_iso_spe))
+  #print(nrow(sel_iso_spe[(as.vector(sel_iso_spe$same_seq)),]))
+  return(list(
+    "3'isomir" = iso_3p,
+    "5'isomir" = iso_5p,
+    "Polymorphic" = iso_poly,
+    "5' and 3'" = iso_3p_5p,
+    "Others" = others
+  ))
+}
+  
+species_venn = lapply(datasets_analysis_normalized, sepecies_form_stats_for_venn)
+
+conditions = c("3'isomir", "5'isomir", "Polymorphic", "5' and 3'", "Others")
+
+for (condition in conditions) {
+  grid.newpage()
+  draw.pairwise.venn(area1 = length(as.vector(species_venn$`Senescence dataset`[[condition]])),
+                 area2 = length(species_venn$`Nucleus vs. cytoplasm`[[condition]]),
+                 cross.area = length(intersect(species_venn$`Senescence dataset`[[condition]], species_venn$`Nucleus vs. cytoplasm`[[condition]])),
+                 fill = c("cyan", "green"),
+                 lty = "blank",
+                 category =  c(paste(condition, ' Sene', sep = ''), paste(condition, ' Nucl', sep = '')))
+}
+
+grid.newpage()
+
+draw.pairwise.venn(area1 = length(row.names(datasets_analysis_normalized$`Senescence dataset`$isomir)),
+                 area2 = length(row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir)),
+                 cross.area = length(intersect(row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir))),
+                 fill = c("cyan", "green"),
+                 lty = "blank",
+                 category =  c('Senescence', 'Compartment'))
+
+i = 0
+plots = list()
+
+species = list(
+    'S' = as.vector(row.names(datasets_analysis_normalized$`Senescence dataset`$isomir)),
+    'C' = as.vector(row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir))
+)
+plots[['All Species']] = ggvenn(species, c("S", "C"), show_percentage = FALSE) + ggtitle('All Species')
+
+for (condition in conditions) {
+  species = list(
+    'S' = as.vector(species_venn$`Senescence dataset`[[condition]]),
+    'C' = as.vector(species_venn$`Nucleus vs. cytoplasm`[[condition]])
+  )
+  plots[[condition]] = ggvenn(species, c("S", "C"), show_percentage = FALSE) + ggtitle(condition)
+}
+
+for (condition in conditions) {
+  species = list(
+    'S' = as.vector(species_venn$`Senescence dataset`[[condition]]),
+    'H' = as.vector(species_venn$`Huvecs athero`[[condition]])
+  )
+  plots[[condition]] = ggvenn(species, c("S", "H"), show_percentage = FALSE) + ggtitle(condition)
+}
+
+
+multiplot(plotlist = plots, cols=3)
+
+
+```
+
+## Venn targets
+```{r}
+ref_list = read.csv2("Target_analysis/Ref_126", sep = ",", header = FALSE)
+iso_1 = read.csv2("Target_analysis/iso_1_126", sep = ",", header = FALSE)
+iso_2 = read.csv2("Target_analysis/iso_2_126", sep = ",", header = FALSE)
+
+list_venn = list(
+  "Ref-miR targets" = ref_list$V1,
+  "IsomiR 1 targets" = iso_1$V1,
+  "IsomiR 2 targets" = iso_2$V1)
+
+ggvenn(list_venn, c("IsomiR 1 targets", "IsomiR 2 targets", "Ref-miR targets"), fill_color = c("#CC79A7", "#F0E442", "#009E73"), show_percentage = FALSE)
+
+```
+
+
+
+## Shared Isomir against threshold
+
+```{r}
+
+species_one_dataset <- function(datasets, thresholds = 1:100, norm = TRUE) {
+  threshold_iter = c()
+  category = c()
+  conditions = c("3'isomir", "5'isomir", "Polymorphic", "5' and 3'", "Others")
+  percentage_against_nucl = c()
+  for (thresh in thresholds) {
+    if (thresh %% 20 == 0) {print(thresh)}
+    #print('test1')
+    datasets_analysis_normalized = mclapply(datasets, function(dataset) {
+      return(normalize_and_select(dataset, thresh, norm = TRUE)) 
+    }, mc.cores = 12)
+    species_venn = mclapply(datasets_analysis_normalized, sepecies_form_stats_for_venn, mc.cores = 12)
+    for (condition in conditions) {
+      common = length(intersect(species_venn$`Senescence dataset`[[condition]], species_venn$`Nucleus vs. cytoplasm`[[condition]]))
+      nucl = length(species_venn$`Nucleus vs. cytoplasm`[[condition]])
+      sene = length(species_venn$`Senescence dataset`[[condition]])
+      perc_common = max(c(100 * common / nucl, 100 * common / sene))
+      percentage_against_nucl = c(percentage_against_nucl, perc_common)
+      category = c(category, condition)
+      threshold_iter = c(threshold_iter, thresh)
+    }
+    #Now for the total isomiR perc
+    common = length(intersect(row.names(datasets_analysis_normalized$`Senescence dataset`$isomir), row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir)))
+    nucl = length(row.names(datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir))
+    sene = length(row.names(datasets_analysis_normalized$`Senescence dataset`$isomir))
+    perc_common = max(c(100 * common / nucl, 100 * common / sene))
+    percentage_against_nucl = c(percentage_against_nucl, perc_common)
+    category = c(category, 'All isomiRs')
+    threshold_iter = c(threshold_iter, thresh)
+  }
+  df = data.frame(category, percentage_against_nucl, threshold_iter)
+  return(df)
+}
+
+thresholds = 1:200
+
+res_venn = species_one_dataset(datasets_analysis, thresholds, norm = TRUE)
+
+ggplot(data=res_venn, aes(x=threshold_iter, y=percentage_against_nucl, group=category)) +  geom_line(aes(color=category)) + ylim(0, 100) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Percentage of shared isomiR (maximum)')
+
+
+## For  all 
+
+res_venn_all = res_venn[res_venn$category == 'All isomiRs',]
+
+ggplot(data=res_venn_all, aes(x=threshold_iter, y=percentage_against_nucl, group=category)) +  geom_line(aes(color=category)) + ylim(0, 100) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Percentage of shared isomiR (maximum)')
+
+
+df_histo = res_venn[res_venn$threshold_iter == 20,]
+
+ggplot(df_histo, aes(x=category, y=percentage_against_nucl)) + 
+  geom_bar(stat = "identity")
+
+
+```
+
+## Number of isomirs for which the mirbase seq is  expressed
+
+```{r}
+
+species_venn = lapply(datasets_analysis_normalized, sepecies_form_stats_for_venn)
+
+conditions = c("3'isomir", "5'isomir", "Polymorphic", "5' and 3'", "Others")
+
+perc_mirbase = function(dataset_name)  {
+  percentage = c()
+  canno_nb = c()
+  iso_nb = c()
+  ratio_iso_canno = c()
+  for (condition in conditions){
+    canno_sps = unique(type_isomir.species[species_venn[[dataset_name]][[condition]], 'host_id'])
+    percentage = c(percentage, 100 * sum((type_isomir.species$host_id %in% canno_sps) & (type_isomir.species$same_seq) & (row.names(type_isomir.species) %in% row.names(datasets_analysis_normalized[[dataset_name]]$isomir))) / length(canno_sps))
+    canno_nb = c(canno_nb,  length(canno_sps))
+    iso_nb = c(iso_nb, length(species_venn[[dataset_name]][[condition]]))
+    ratio_iso_canno = c(ratio_iso_canno, length(species_venn[[dataset_name]][[condition]]) / length(canno_sps))
+  }
+  return(data.frame(percentage, canno_nb, iso_nb, ratio_iso_canno, row.names = conditions))
+}
+
+percentages = lapply(names(species_venn),  perc_mirbase)
+
+
+percentage = list()
+for (condition in conditions){
+  canno_sps = unique(type_isomir.species[species_venn$`Senescence dataset`[[condition]], 'host_id'])
+  percentage[[condition]] = 100 * sum((type_isomir.species$host_id %in% canno_sps) & (type_isomir.species$same_seq) & (row.names(type_isomir.species) %in% row.names(datasets_analysis_normalized$`Senescence dataset`$isomir))) / length(canno_sps)
+}
+
+write_csv(percentages[[1]], 'senescence.csv')
+write_csv(percentages[[2]], 'comp.csv')
+
+percentages
+
+unique(type_isomir.species[species_venn$`Nucleus vs. cytoplasm`$`Polymorphic`, 'host_id'])
+intersect(unique(type_isomir.species[species_venn$`Senescence dataset`$`Polymorphic`, 'host_id']),
+unique(type_isomir.species[species_venn$`Nucleus vs. cytoplasm`$`Polymorphic`, 'host_id']))
+
+unique(type_isomir.species[species_venn$`Nucleus vs. cytoplasm`$Others, 'host_id'])
+intersect(unique(type_isomir.species[species_venn$`Senescence dataset`$Others, 'host_id']),
+unique(type_isomir.species[species_venn$`Nucleus vs. cytoplasm`$Others, 'host_id']))
+
+
+##
+
+unique(type_isomir.species[species_venn$`Huvecs athero`$`Polymorphic`, 'host_id'])
+intersect(unique(type_isomir.species[species_venn$`Senescence dataset`$`Polymorphic`, 'host_id']),
+unique(type_isomir.species[species_venn$`Huvecs athero`$`Polymorphic`, 'host_id']))
+
+
+
+
+
+
+
+
+```
+
+
+
+## Isomir  type distrib against threshold
+
+```{r isomir_type_distrib_2}
+
+
+sepecies_form_stats <- function(dataset, perc = FALSE) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]
+  #print(nrow(sel_iso_spe))
+  if (nrow(sel_iso_spe) == 0){
+    iso_3p = 0
+    iso_5p = 0
+    iso_poly = 0
+    iso_3p_5p = 0
+    others = 0
+    all = 0
+  } else {
+    sel_iso_spe = sel_iso_spe[!(sel_iso_spe$Sequence %in% cannonical_mirna_list) & ((as.vector(sel_iso_spe$Anno_idx) != "") | (as.vector(sel_iso_spe$hsa_miRNA) != "")),]
+    iso_3p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+    iso_5p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+    iso_poly = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) == 0) & (as.vector(sel_iso_spe$form_5_n) == 0) & (as.vector(sel_iso_spe$n_mismatch) != 0)),])
+    iso_3p_5p = nrow(sel_iso_spe[((as.vector(sel_iso_spe$form_3_n) != 0) & (as.vector(sel_iso_spe$form_5_n) != 0) & (as.vector(sel_iso_spe$n_mismatch) == 0)),])
+    others = nrow(sel_iso_spe) - iso_3p_5p - iso_3p - iso_5p - iso_poly
+    all = nrow(sel_iso_spe)
+  }
+  res = list(
+    "3' isomir" = iso_3p,
+    "5' isomir" = iso_5p,
+    "Polymorphic" = iso_poly,
+    "5' and 3'" = iso_3p_5p,
+    "Others" = others,
+    "All" = all
+  )
+  category = names(res)
+  count = unlist(res)
+  if (perc) {
+    count = 100 * count / nrow(sel_iso_spe)
+  }
+  df = data.frame(category, count)
+  return(df)
+}
+
+species_one_dataset <- function(dataset, thresholds = 1:100, norm = TRUE, perc = FALSE) {
+  threshold_iter = c()
+  category = c()
+  count = c()
+  for (thresh in thresholds) {
+    if (thresh %% 20 == 0) {print(thresh)}
+    #print('test1')
+    sel_dataset = normalize_and_select(dataset, thresh, norm = norm)
+    df_one = sepecies_form_stats(sel_dataset, perc)
+    #print('test2')
+    threshold_iter = c(threshold_iter, rep(thresh, 6))
+    category = c(category, as.character(df_one$category))
+    count = c(count, df_one$count)
+  }
+  df = data.frame(category, count, threshold_iter)
+  return(df)
+}
+
+thresholds = 1:200
+
+species_form_res = mclapply(data_stats, species_one_dataset, thresholds = thresholds, mc.cores = 12)
+
+plots = lapply(names(species_form_res), function(dataset) {
+  return(ggplot(data=species_form_res[[dataset]], aes(x=threshold_iter, y=count, group=category)) +  geom_line(aes(color=category)) + ylim(0, 2000) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Number of detected species') + ggtitle(dataset))
+})
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+
+
+species_form_res_perc = mclapply(data_stats, species_one_dataset, thresholds = thresholds,  perc = TRUE, mc.cores =  12)
+
+plots_perc = lapply(names(species_form_res_perc), function(dataset) {
+  return(ggplot(data=species_form_res_perc[[dataset]], aes(x=threshold_iter, y=count, group=category)) +  geom_line(aes(color=category)) + ylim(0, 100) + xlab('Expression cutoff of isomiR (avg. RPM/sample)') + ylab('Type detected species (% of all species)') + ggtitle(dataset))
+})
+
+multiplot(plots_perc[[1]], plots_perc[[2]], cols=2)
+
+
+test = sepecies_form_stats(data_stats$`Senescence dataset`)
+
+par(mfrow=c(1,1))
+  ggplot(test, aes(category, count)) + 
+  geom_bar(stat="identity", position = "dodge", width=0.7, color = 'black') + scale_fill_brewer(palette = "Set2") + scale_y_log10(n.breaks = 7) + coord_flip() +
+  geom_text(aes(label=count), vjust=0.5, hjust = 1.2, color="white", position = position_dodge(0.9), size=3.5) + ylab("Number of species") + xlab("Type of RNA") +
+  scale_fill_discrete(name = "Type of RNA") +
+  guides(fill = guide_legend(reverse = TRUE)) + ggtitle('Senescence') +
+  theme_minimal()
+
+
+```
+
+
+## Num iso distrib 
+
+```{r}
+sepecies_form_stats <- function(dataset, perc = FALSE) {
+  filtered_isomir_data = dataset$isomir
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]
+  #print(nrow(sel_iso_spe))
+  if (nrow(sel_iso_spe) == 0){
+    all = 0
+  } else {
+    all = nrow(sel_iso_spe)
+  }
+  res = list(
+    "All" = all
+  )
+  category = names(res)
+  count = unlist(res)
+  if (perc) {
+    count = 100 * count / nrow(sel_iso_spe)
+  }
+  df = data.frame(category, count)
+  return(df)
+}
+
+species_one_dataset <- function(dataset, thresholds = 1:100, norm = TRUE, perc = FALSE) {
+  threshold_iter = c()
+  category = c()
+  count = c()
+  for (thresh in thresholds) {
+    if (thresh %% 20 == 0) {print(thresh)}
+    #print('test1')
+    sel_dataset = normalize_and_select(dataset, thresh, norm = norm)
+    df_one = sepecies_form_stats(sel_dataset, perc)
+    #print('test2')
+    threshold_iter = c(threshold_iter, rep(thresh, 1))
+    category = c(category, as.character(df_one$category))
+    count = c(count, df_one$count)
+  }
+  df = data.frame(category, count, threshold_iter)
+  return(df)
+}
+
+thresholds = 0:200
+
+species_form_res = mclapply(data_stats, species_one_dataset, thresholds = thresholds, mc.cores = 12)
+
+plots = lapply(names(species_form_res), function(dataset) {
+  return(ggplot(data=species_form_res[[dataset]], aes(x=threshold_iter, y=count)) +  geom_line() + geom_vline(xintercept = 20, linetype="dotted", color = "red") + xlab('Expression cutoff (avg. RPM/sample)') + ylab('Number of detected species') + ggtitle(dataset))
+})
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+```
+
+## Perc iso distrib
+
+```{r perc iso distrib}
+sepecies_form_stats <- function(dataset, threshold) {
+  sel_dataset = normalize_and_select(dataset, threshold, norm = TRUE)
+  filtered_isomir_data = sel_dataset$isomir
+  sel_iso_spe = type_isomir.species[rownames(type_isomir.species) %in% rownames(filtered_isomir_data),]
+  exp_mirbase = sum(filtered_isomir_data[row.names(sel_iso_spe[sel_iso_spe$same_seq == TRUE,]),])
+  exp_iso = sum(filtered_isomir_data[row.names(sel_iso_spe[sel_iso_spe$same_seq == FALSE,]),])
+  return(100 * (exp_iso / (exp_iso + exp_mirbase) ))
+}
+
+
+thresholds = 0:200
+names(thresholds) = thresholds
+
+percs_one_dataset = function(dataset, thresholds){
+  percs = lapply(thresholds, function(thresh) {
+    if (thresh %% 20 == 0) {print(thresh)}
+    sepecies_form_stats(dataset, thresh)
+  })
+  data_perc = unlist(percs)
+  threshold = as.numeric(names(data_perc))
+  return(data.frame(data_perc, threshold))
+}
+
+thresholds = 0:200
+names(thresholds) = thresholds
+
+percs_to_plot = mclapply(datasets_analysis, percs_one_dataset, thresholds = thresholds, mc.cores = 12)
+
+plots = lapply(names(percs_to_plot), function(dataset) {
+  return(ggplot(data=percs_to_plot[[dataset]], aes(x=threshold, y=data_perc)) + geom_line() + ylim(0,100) + xlab('isomiR cutoff') + ylab('Percentage of isomiR exp') + ggtitle(dataset))
+})
+
+multiplot(plots[[1]], plots[[2]], cols=2)
+```
+
+
+##Covariance figure
+
+```{r}
+condition_df_iso = list(
+  'S0' = datasets_analysis_normalized$`Senescence dataset`$isomir[,c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3')],
+  'S1' = datasets_analysis_normalized$`Senescence dataset`$isomir[,c('senescence_s1_don1', 'senescence_s1_don2', 'senescence_s1_don3', 'senescence_s1_don4')],
+  'S2' = datasets_analysis_normalized$`Senescence dataset`$isomir[,c('senescence_s2_don1', 'senescence_s2_don2', 'senescence_s2_don3', 'senescence_s2_don4')],
+  'S3' = datasets_analysis_normalized$`Senescence dataset`$isomir[,c('senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', 'senescence_s3_don4')],
+  'N_NT' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('N_NT_1_S1', 'N_NT_2_S2', 'N_NT_3_S3')],
+  'N_7' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('N_7_1_S4', 'N_7_2_S5', 'N_7_3_S6')],
+  'N_24' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('N_24_1_S7', 'N_24_2_S8', 'N_24_3_S9')],
+  'C_NT' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('C_NT_1_S10', 'C_NT_2_S11', 'C_NT_3_S12')],
+  'C_7' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('C_7_1_S13', 'C_7_2_S14', 'C_7_3_S15')],
+  'C_24' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$isomir[,c('C_24_1_S16', 'C_24_2_S17', 'C_24_3_S18')]
+)
+
+condition_df_canno = list(
+  'S0' = datasets_analysis_normalized$`Senescence dataset`$cannonical[,c('senescence_s0_don1', 'senescence_s0_don2', 'senescence_s0_don3')],
+  'S1' = datasets_analysis_normalized$`Senescence dataset`$cannonical[,c('senescence_s1_don1', 'senescence_s1_don2', 'senescence_s1_don3', 'senescence_s1_don4')],
+  'S2' = datasets_analysis_normalized$`Senescence dataset`$cannonical[,c('senescence_s2_don1', 'senescence_s2_don2', 'senescence_s2_don3', 'senescence_s2_don4')],
+  'S3' = datasets_analysis_normalized$`Senescence dataset`$cannonical[,c('senescence_s3_don1', 'senescence_s3_don2', 'senescence_s3_don3', 'senescence_s3_don4')],
+  'N_NT' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('N_NT_1_S1', 'N_NT_2_S2', 'N_NT_3_S3')],
+  'N_7' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('N_7_1_S4', 'N_7_2_S5', 'N_7_3_S6')],
+  'N_24' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('N_24_1_S7', 'N_24_2_S8', 'N_24_3_S9')],
+  'C_NT' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('C_NT_1_S10', 'C_NT_2_S11', 'C_NT_3_S12')],
+  'C_7' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('C_7_1_S13', 'C_7_2_S14', 'C_7_3_S15')],
+  'C_24' = datasets_analysis_normalized$`Nucleus vs. cytoplasm`$cannonical[,c('C_24_1_S16', 'C_24_2_S17', 'C_24_3_S18')]
+)
+
+
+co.var <- function(x) ( sd(x)/mean(x) )
+
+co.var(as.numeric(as.vector(datasets_analysis_normalized$`Senescence dataset`$isomir[1,])))
+
+cov = apply(as.matrix(datasets_analysis_normalized$`Senescence dataset`$isomir), 1, function(x) {
+  return(co.var(as.numeric(as.vector(x))))
+})
+
+cov_vector = function(conditions) {
+  cov = c()
+  type = c()
+  condition = c()
+  for (condition_name in conditions) {
+      cov_iso = apply(as.matrix(condition_df_iso[[condition_name]][!(row.names(condition_df_iso[[condition_name]]) %in% row.names(type_isomir.species[type_isomir.species$same_seq,])),]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    })
+    cov_canno = apply(as.matrix(condition_df_canno[[condition_name]]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    })
+    cov = c(cov, c(cov_iso, cov_canno))
+    type = c(type, c(rep('isomir', length(cov_iso)), rep('mirbase_seq', length(cov_canno))))
+    condition = c(condition, rep(condition_name, length(cov_iso) + length(cov_canno)))
+  }
+  return(data.frame(cov, type, condition))
+}
+
+test = cov_vector(names(condition_df_iso))
+
+ggplot(test, aes(x=condition, y=cov, fill = type)) + 
+  geom_boxplot()
+
+species_venn = lapply(datasets_analysis_normalized, sepecies_form_stats_for_venn)
+
+types_iso = c("3' isomir", "5' isomir", "Polymorphic", "5' and 3'", "Others")
+
+
+cov_vector = function(conditions) {
+  cov = c()
+  type = c()
+  condition = c()
+  for (condition_name in conditions) {
+    if(condition_name %in% c('S0', 'S1', 'S2', 'S3')){
+      dataset_name = 'Senescence dataset'
+    } else {
+      dataset_name = 'Nucleus vs. cytoplasm'
+    }
+    cov_iso = apply(as.matrix(condition_df_iso[[condition_name]]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    })
+    cov_canno = apply(as.matrix(condition_df_canno[[condition_name]]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    })
+    cov = c(cov, c(cov_iso, cov_canno))
+    type = c(type, c(rep('isomir_all', length(cov_iso)), rep('mirbase_seq', length(cov_canno))))
+    condition = c(condition, rep(condition_name, length(cov_iso) + length(cov_canno)))
+    for (type_iso in types_iso) {
+      #print(type)
+      #print(dataset_name)
+      iso_sp = as.vector(species_venn[[dataset_name]][[type_iso]])
+      cov_iso = apply(as.matrix(condition_df_iso[[condition_name]][(row.names(condition_df_iso[[condition_name]]) %in% iso_sp),]), 1, function(x) {
+        return(co.var(as.numeric(as.vector(x))))
+      })
+      cov = c(cov, cov_iso)
+      type = c(type, c(rep(type_iso, length(cov_iso))))
+      condition = c(condition, rep(condition_name, length(cov_iso)))
+    }
+  }
+  type = factor(type, levels = c('mirbase_seq', 'isomir_all', types_iso))
+  return(data.frame(cov, type, condition))
+}
+
+covs = cov_vector(names(condition_df_iso))
+
+ggplot(covs, aes(x=condition, y=cov, fill = type)) + 
+  geom_boxplot()
+
+```
+
+
+## Cov plot
+
+```{r}
+
+cov_distrib = function(dataset) {
+  sel_iso = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset$isomir),]
+  sel_iso = sel_iso[sel_iso$host_id %in% unique(type_canno.species[row.names(dataset$cannonical),'host_name']),]
+  cov_iso = c()
+  cov_canno = c()
+  mirna = c()
+  type = c()
+  mean_exp = c()
+  for (canno_sp in unique(sel_iso$host_id)) {
+    num_iso = length(row.names(sel_iso[sel_iso$host_id == canno_sp,]))
+    cov_iso = c(cov_iso, apply(as.matrix(dataset$isomir[row.names(sel_iso[sel_iso$host_id == canno_sp,]),]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    }))
+    type = c(type, type_isomir.species[row.names(dataset$isomir[row.names(sel_iso[sel_iso$host_id == canno_sp,]),]),'isomir_type'])
+    mean_exp = c(mean_exp, log10(rowMeans(dataset$isomir[row.names(sel_iso[sel_iso$host_id == canno_sp,]),])) )
+    cov_canno = c(cov_canno, rep(co.var(as.numeric(as.vector(dataset$cannonical[row.names(type_canno.species[type_canno.species$host_name==canno_sp,]),]))), num_iso))
+    mirna = c(mirna, rep(canno_sp, num_iso))
+  }
+  return(data.frame(cov_iso, cov_canno, mirna, type, mean_exp))
+}
+
+test = cov_distrib(datasets_analysis_normalized$`Senescence dataset`)
+
+test[['diff']] = test$cov_canno - test$cov_iso
+sum(test$diff > 0)
+pos = test[test$diff > 0,]
+100 * table(pos$type) / nrow(pos)
+neg = test[test$diff < 0,]
+100 * table(neg$type) / nrow(neg)
+
+
+d = 0.4
+u = 2
+by = 0.1
+
+ggplot(na.omit(test), aes(x=cov_iso, y=cov_canno, color = mirna)) + geom_point() + theme(legend.position = "none") + scale_y_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + scale_x_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + geom_abline(intercept = 0, slope = 1) + ggtitle('Senescence dataset')
+
+
+test = cov_distrib(datasets_analysis_normalized$`Nucleus vs. cytoplasm`)
+
+test[['diff']] = test$cov_canno - test$cov_iso
+sum(test$diff > 0)
+pos = test[test$diff > 0,]
+100 * table(pos$type) / nrow(pos)
+neg = test[test$diff < 0,]
+100 * table(neg$type) / nrow(neg)
+
+sum(test$diff < 0)
+
+d = 0.3
+u = 1
+by = 0.1
+
+ggplot(na.omit(test), aes(x=cov_iso, y=cov_canno, color = mirna)) + geom_point() + theme(legend.position = "none") + scale_y_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + scale_x_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + geom_abline(intercept = 0, slope = 1) + ggtitle('Compartment dataset')
+
+
+
+## Covariance plot per condition
+
+cov_distrib = function(condition) {
+  sel_iso = type_isomir.species[row.names(type_isomir.species) %in% row.names(condition_df_iso[[condition]]),]
+  sel_iso = sel_iso[sel_iso$host_id %in% unique(type_canno.species[row.names(condition_df_canno[[condition]]),'host_name']),]
+  cov_iso = c()
+  cov_canno = c()
+  mirna = c()
+  type = c()
+  mean_exp = c()
+  for (canno_sp in unique(sel_iso$host_id)) {
+    num_iso = length(row.names(sel_iso[sel_iso$host_id == canno_sp,]))
+    cov_iso = c(cov_iso, apply(as.matrix(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),]), 1, function(x) {
+      return(co.var(as.numeric(as.vector(x))))
+    }))
+    type = c(type, type_isomir.species[row.names(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),]),'isomir_type'])
+    mean_exp = c(mean_exp, log10(rowMeans(condition_df_iso[[condition]][row.names(sel_iso[sel_iso$host_id == canno_sp,]),])) )
+    cov_canno = c(cov_canno, rep(co.var(as.numeric(as.vector(condition_df_canno[[condition]][row.names(type_canno.species[type_canno.species$host_name==canno_sp,]),]))), num_iso))
+    mirna = c(mirna, rep(canno_sp, num_iso))
+  }
+  return(data.frame(cov_iso, cov_canno, mirna, type, mean_exp))
+}
+
+
+
+conditions = names(condition_df_iso)
+names(conditions) = conditions
+plots = mclapply(conditions, function(condition) {
+  test = cov_distrib(condition)
+  test[['diff']] = test$cov_canno - test$cov_iso
+  print(condition)
+  print(sum(na.omit(test$diff > 0)))
+  print(sum(na.omit(test$diff < 0)))
+  pos = test[test$diff > 0,]
+  print(100 * table(pos$type) / nrow(pos))
+  neg = test[test$diff < 0,]
+  print(100 * table(neg$type) / nrow(neg))
+
+  
+  d = 0
+  u = 1.5
+  by = 0.2
+  
+  plot = ggplot(na.omit(test), aes(x=cov_iso, y=cov_canno, color = mirna)) + geom_point() + theme(legend.position = "none") + scale_y_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + scale_x_continuous(limits = c(d, u), breaks = seq(d, u, by = by)) + geom_abline(intercept = 0, slope = 1) + ggtitle(condition)
+  return(plot)
+}, mc.cores = 12)
+
+multiplot(plotlist = plots, cols = 5)
+
+```
+
+## cov iso distribution
+
+```{r}
+hist(covs[covs$condition == 'N_24', 'cov'], breaks = 50)
+```
+
+
+
+
+
+
+## Count distribution per isomir
+
+```{r isomir_count_per_canno}
+
+datasets_analysis_normalized = lapply(datasets_analysis, function(dataset) {
+  return(normalize_and_select(dataset, 10, norm = TRUE)) 
+})
+
+dataset_test = datasets_analysis_normalized$`Senescence dataset`
+
+iso_sel = type_isomir.species[row.names(type_isomir.species) %in% row.names(dataset_test$isomir),]
+
+for (canno_sp in unique(iso_sel$host_id)){
+  if (nrow(iso_sel[iso_sel$host_id == canno_sp,]) > 25){
+    mean_exp = rowMeans(dataset_test$isomir[row.names(dataset_test$isomir) %in% row.names(type_isomir.species[type_isomir.species$host_id == canno_sp,]),])
+    hist(mean_exp, breaks = 150, main = canno_sp)
+  }
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
